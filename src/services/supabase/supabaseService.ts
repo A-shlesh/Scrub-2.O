@@ -5,11 +5,9 @@ import { supabase, supabaseConfigured } from './supabaseClient';
 
 /** Current time in IST (Asia/Kolkata, UTC+5:30) as an ISO string. */
 function nowIst(): string {
-  const d = new Date();
-  // IST offset is +5:30 = +330 minutes
-  const utcMs = d.getTime() + d.getTimezoneOffset() * 60_000;
-  const istMs = utcMs + 5.5 * 3600_000;
-  return new Date(istMs).toISOString().replace('Z', '+05:30');
+  const now = Date.now();
+  const IST_MS = 5.5 * 60 * 60 * 1000;
+  return new Date(now + IST_MS).toISOString().replace('Z', '+05:30');
 }
 
 function polygonEwkt(points: LatLon[]): string {
