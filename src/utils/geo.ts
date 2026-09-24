@@ -622,7 +622,10 @@ export function pathLengthM(path: LatLon[]): number {
  */
 export function cellsToCsv(cells: GridCell[], opts: { lakeId: string; cellSizeM: number }): string {
   const header = 'grid_id,lake_id,grid_code,grid_size_m,center_lat,center_lon,center_geom,created_at';
-  const createdAt = new Date().toISOString();
+  const d = new Date();
+  const utcMs = d.getTime() + d.getTimezoneOffset() * 60_000;
+  const istMs = utcMs + 5.5 * 3600_000;
+  const createdAt = new Date(istMs).toISOString().replace('Z', '+05:30');
   const rows = cells.map((c) => {
     const geom = `SRID=4326;POINT(${c.center.lon} ${c.center.lat})`;
     return [

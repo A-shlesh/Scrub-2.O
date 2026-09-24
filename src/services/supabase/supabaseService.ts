@@ -3,6 +3,15 @@ import { openRing } from '../../utils/geo';
 import { getOrCreateSupabaseGridId, getOrCreateSupabaseLakeId } from '../storage/lakeStorage';
 import { supabase, supabaseConfigured } from './supabaseClient';
 
+/** Current time in IST (Asia/Kolkata, UTC+5:30) as an ISO string. */
+function nowIst(): string {
+  const d = new Date();
+  // IST offset is +5:30 = +330 minutes
+  const utcMs = d.getTime() + d.getTimezoneOffset() * 60_000;
+  const istMs = utcMs + 5.5 * 3600_000;
+  return new Date(istMs).toISOString().replace('Z', '+05:30');
+}
+
 function polygonEwkt(points: LatLon[]): string {
   const ring = openRing(points);
   const closed = [...ring, ring[0]];
@@ -27,12 +36,16 @@ export async function pushLakeAndGrids(lake: Lake, cells: GridCell[], cellSizeM:
   if (!boundary || boundary.length < 3) throw new Error('This lake has no boundary to send.');
   if (cells.length === 0) throw new Error('This lake has no grid points to send.');
 
-  const lakeId = getOrCreateSupabaseLakeId(lake.id);
+  // If this is a sample polygon inside a real lake, push grids under the parent lake.
+  const targetLakeId = lake.parentLakeId ?? lake.id;
+  const lakeId = getOrCreateSupabaseLakeId(targetLakeId);
+  const now = nowIst();
 
   const { error: lakeError } = await supabase.from('lakes').upsert({
     lake_id: lakeId,
     name: lake.name ?? 'Unnamed',
     boundary: polygonEwkt(boundary),
+    created_at: now,
   });
   if (lakeError) throw new Error(`Could not save lake: ${lakeError.message}`);
 
@@ -44,6 +57,7 @@ export async function pushLakeAndGrids(lake: Lake, cells: GridCell[], cellSizeM:
     center_lat: c.center.lat,
     center_lon: c.center.lon,
     center_geom: pointEwkt(c.center),
+    created_at: now,
   }));
 
   // Chunked so a large lake's grid doesn't hit request-size limits in one call.
@@ -52,6 +66,28 @@ export async function pushLakeAndGrids(lake: Lake, cells: GridCell[], cellSizeM:
     const { error: gridError } = await supabase.from('grids').upsert(gridRows.slice(i, i + CHUNK));
     if (gridError) throw new Error(`Could not save grid points (batch starting at row ${i + 1}): ${gridError.message}`);
   }
+}
+
+/**
+ * Query Supabase for existing "Sample Polygon N" names and return N+1.
+ * Falls back to 1 if Supabase is unreachable or has no sample polygons.
+ */
+export async function fetchNextPolygonNumber(): Promise<number> {
+  if (!supabaseConfigured || !supabase) return 1;
+  const { data, error } = await supabase
+    .from('lakes')
+    .select('name')
+    .like('name', 'Sample Polygon %');
+  if (error || !data) return 1;
+  let max = 0;
+  for (const row of data as { name: string }[]) {
+    const m = row.name.match(/Sample Polygon (\d+)/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > max) max = n;
+    }
+  }
+  return max + 1;
 }
 
 // ── Sensor metadata ────────────────────────────────────────────────────────

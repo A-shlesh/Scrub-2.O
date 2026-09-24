@@ -9,7 +9,6 @@ import {
   loadGridSnapshots,
   loadRecentLakes,
   loadSavedLake,
-  nextPolygonNumber,
   rememberLake,
   removeLake as removeLakeFromStorage,
   saveGridConfig,
@@ -18,7 +17,8 @@ import {
 } from '../services/storage/lakeStorage';
 import type { GridSnapshot } from '../services/storage/lakeStorage';
 import { DEMO, demoLakes, isDemoId } from '../demo/demo';
-import { generateGrid, gridExceedsLimit, ringCenter, suggestCellSizeM } from '../utils/geo';
+import { generateGrid, gridExceedsLimit, pointInPolygon, ringCenter, suggestCellSizeM } from '../utils/geo';
+import { fetchNextPolygonNumber } from '../services/supabase/supabaseService';
 /** Sampling cell edge in metres, used until a lake has its own grid config. */
 export const DEFAULT_CELL_SIZE_M = 20;
 export const MIN_CELL_SIZE_M = 8;
@@ -38,7 +38,7 @@ interface LakeCtx {
   /** Persist an edited or hand-drawn SCRUB boundary (with its islands, if any). */
   saveBoundary: (points: LatLon[], holes?: LatLon[][]) => void;
   /** Create and select a new sample polygon (SAM1, SAM2, ...) from hand-drawn points — for testing outside real lakes. */
-  addPolygon: (points: LatLon[], holes?: LatLon[][], name?: string) => void;
+  addPolygon: (points: LatLon[], holes?: LatLon[][], name?: string) => Promise<void>;
   boundary: LatLon[] | null;
   /** islands inside the active outline; the grid and path avoid them */
   holes: LatLon[][];
@@ -66,7 +66,7 @@ const Ctx = createContext<LakeCtx>({
   clearAll: () => undefined,
   removeLake: () => undefined,
   saveBoundary: () => undefined,
-  addPolygon: () => undefined,
+  addPolygon: async () => {},
   boundary: null,
   holes: [],
   gridConfig: null,
@@ -167,21 +167,34 @@ export function LakeProvider({ children }: { children: ReactNode }) {
   );
 
   const addPolygon = useCallback(
-    (points: LatLon[], holes: LatLon[][] = [], name?: string) => {
+    async (points: LatLon[], holes: LatLon[][] = [], name?: string) => {
       if (points.length < 3) return;
-      const n = nextPolygonNumber();
+      const n = await fetchNextPolygonNumber();
+      const center = ringCenter(points);
+      // Check if the polygon center falls inside any existing lake's boundary.
+      // If yes, link the polygon to that lake so grid data gets logged under it.
+      const allLakes = lake ? [lake, ...recent.filter((l) => l.id !== lake.id)] : recent;
+      let parentLakeId: string | undefined;
+      for (const l of allLakes) {
+        const b = l.scrubBoundary?.points ?? l.osmBoundary?.points ?? null;
+        if (b && b.length >= 3 && pointInPolygon(center, b)) {
+          parentLakeId = l.id;
+          break;
+        }
+      }
       const next: Lake = {
         id: `sam:${n}`,
         name: name?.trim() || `Sample Polygon ${n}`,
         waterType: 'sample',
-        center: ringCenter(points),
+        center,
         osmBoundary: null,
         scrubBoundary: { points, holes },
         updatedAt: new Date().toISOString(),
+        ...(parentLakeId ? { parentLakeId } : {}),
       };
       selectLake(next);
     },
-    [selectLake],
+    [selectLake, lake, recent],
   );
 
   const clearLake = useCallback(() => {

@@ -7,7 +7,6 @@ export interface GridSnapshot {
   updatedAt: string;
 }
 
-const POLYGON_COUNTER_KEY = 'scrub:polygonCounter';
 const LAKES_KEY = 'scrub:lakes';
 const RECENT_KEY = 'scrub:recent';
 const SAVED_LAKE_KEY = 'scrub:savedLake';
@@ -53,14 +52,6 @@ export function getOrCreateSupabaseGridId(supabaseLakeId: string, gridCode: stri
   all[key] = uuid;
   writeJson(SUPABASE_GRID_IDS_KEY, all);
   return uuid;
-}
-
-/** Next sample-polygon number (1, 2, 3, ...), persisted so numbers never repeat or collide. */
-export function nextPolygonNumber(): number {
-  const cur = readJson<number>(POLYGON_COUNTER_KEY, 0);
-  const next = cur + 1;
-  writeJson(POLYGON_COUNTER_KEY, next);
-  return next;
 }
 
 function writeJson(key: string, value: unknown): void {

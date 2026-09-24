@@ -132,6 +132,8 @@ export interface Lake {
   /** SCRUB's saved (possibly edited or hand-drawn) boundary */
   scrubBoundary: LakeBoundary | null;
   updatedAt: string;
+  /** If this is a sample polygon drawn inside a real lake, the parent lake's id — so grid data gets logged under the parent. */
+  parentLakeId?: string;
 }
 
 export interface GridConfiguration {
