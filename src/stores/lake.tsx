@@ -171,11 +171,13 @@ export function LakeProvider({ children }: { children: ReactNode }) {
       if (points.length < 3) return;
       const n = await fetchNextPolygonNumber();
       const center = ringCenter(points);
-      // Check if the polygon center falls inside any existing lake's boundary.
+      // Check if the polygon center falls inside any REAL lake's boundary
+      // (skip other sample polygons — always link to a real lake).
       // If yes, link the polygon to that lake so grid data gets logged under it.
       const allLakes = lake ? [lake, ...recent.filter((l) => l.id !== lake.id)] : recent;
       let parentLakeId: string | undefined;
       for (const l of allLakes) {
+        if (isSampleId(l.id)) continue;
         const b = l.scrubBoundary?.points ?? l.osmBoundary?.points ?? null;
         if (b && b.length >= 3 && pointInPolygon(center, b)) {
           parentLakeId = l.id;
