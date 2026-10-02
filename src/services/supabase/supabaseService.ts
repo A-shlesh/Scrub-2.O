@@ -1,4 +1,4 @@
-import type { GridCell, GridCellAverage, GridSession, GridAnalytics, Lake, LatLon, SensorAverage, SensorKey, SensorMeta, SensorSample } from '../../types';
+import type { GridCell, GridCellAverage, GridSession, GridAnalytics, Lake, LatLon, Mission, MissionGrid, SensorAverage, SensorKey, SensorMeta, SensorSample } from '../../types';
 import { openRing } from '../../utils/geo';
 import { getOrCreateSupabaseGridId, getOrCreateSupabaseLakeId } from '../storage/lakeStorage';
 import { supabase, supabaseConfigured } from './supabaseClient';
@@ -26,7 +26,7 @@ function pointEwkt(p: LatLon): string {
  * mission run. Upserts, so re-sending an unchanged lake updates rows in place
  * rather than duplicating them.
  */
-export async function pushLakeAndGrids(lake: Lake, cells: GridCell[], cellSizeM: number): Promise<void> {
+export async function pushLakeAndGrids(lake: Lake, cells: GridCell[], cellSizeM: number): Promise<{ lakeId: string; gridIds: Map<string, string> }> {
   if (!supabaseConfigured || !supabase) {
     throw new Error('Supabase is not configured — missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY.');
   }
@@ -35,17 +35,21 @@ export async function pushLakeAndGrids(lake: Lake, cells: GridCell[], cellSizeM:
   if (cells.length === 0) throw new Error('This lake has no grid points to send.');
 
   // If this is a sample polygon inside a real lake, push grids under the parent lake.
+  // Skip the lakes upsert in that case — don't overwrite the parent's name/boundary.
+  const isChildPolygon = !!lake.parentLakeId;
   const targetLakeId = lake.parentLakeId ?? lake.id;
   const lakeId = getOrCreateSupabaseLakeId(targetLakeId);
   const now = nowIst();
 
-  const { error: lakeError } = await supabase.from('lakes').upsert({
-    lake_id: lakeId,
-    name: lake.name ?? 'Unnamed',
-    boundary: polygonEwkt(boundary),
-    created_at: now,
-  });
-  if (lakeError) throw new Error(`Could not save lake: ${lakeError.message}`);
+  if (!isChildPolygon) {
+    const { error: lakeError } = await supabase.from('lakes').upsert({
+      lake_id: lakeId,
+      name: lake.name ?? 'Unnamed',
+      boundary: polygonEwkt(boundary),
+      created_at: now,
+    });
+    if (lakeError) throw new Error(`Could not save lake: ${lakeError.message}`);
+  }
 
   const gridRows = cells.map((c) => ({
     grid_id: getOrCreateSupabaseGridId(lakeId, c.id),
@@ -64,6 +68,93 @@ export async function pushLakeAndGrids(lake: Lake, cells: GridCell[], cellSizeM:
     const { error: gridError } = await supabase.from('grids').upsert(gridRows.slice(i, i + CHUNK));
     if (gridError) throw new Error(`Could not save grid points (batch starting at row ${i + 1}): ${gridError.message}`);
   }
+
+  return { lakeId, gridIds: new Map(gridRows.map((r) => [r.grid_code, r.grid_id])) };
+}
+
+/**
+ * Create a mission with one mission_grids row per cell.
+ * Call AFTER pushLakeAndGrids — needs the grids to exist.
+ * sequence_order follows the coverage path order (cells in `orderedGridCodes`
+ * first, in that order, then any remaining cells).
+ * Returns the new mission_id.
+ */
+export async function createMission(
+  supabaseLakeId: string,
+  gridCodeToId: Map<string, string>,
+  orderedGridCodes: string[],
+  deviceId = 'BOT001',
+): Promise<string> {
+  if (!supabaseConfigured || !supabase) {
+    throw new Error('Supabase is not configured — missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY.');
+  }
+  const now = nowIst();
+  const missionId = crypto.randomUUID();
+
+  const { error: mErr } = await supabase.from('missions').insert({
+    mission_id: missionId,
+    device_id: deviceId,
+    lake_id: supabaseLakeId,
+    status: 'PENDING',
+    created_at: now,
+    notes: null,
+  });
+  if (mErr) throw new Error(`Could not create mission: ${mErr.message}`);
+
+  // Build the visit order: path cells first, then leftovers.
+  const seen = new Set<string>();
+  const ordered: { gridCode: string; gridId: string }[] = [];
+  for (const code of orderedGridCodes) {
+    const gid = gridCodeToId.get(code);
+    if (gid && !seen.has(code)) {
+      seen.add(code);
+      ordered.push({ gridCode: code, gridId: gid });
+    }
+  }
+  for (const [code, gid] of gridCodeToId) {
+    if (!seen.has(code)) ordered.push({ gridCode: code, gridId: gid });
+  }
+
+  const rows = ordered.map((o, i) => ({
+    mission_grid_id: crypto.randomUUID(),
+    mission_id: missionId,
+    grid_id: o.gridId,
+    sequence_order: i + 1,
+    status: 'PENDING',
+    session_id: null,
+  }));
+
+  const CHUNK = 500;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const { error: gErr } = await supabase.from('mission_grids').insert(rows.slice(i, i + CHUNK));
+    if (gErr) throw new Error(`Could not create mission grid rows (batch at ${i + 1}): ${gErr.message}`);
+  }
+  return missionId;
+}
+
+/**
+ * Fetch mission progress: completed vs total cells for the latest mission of a lake.
+ */
+export async function fetchMissionProgress(lakeId: string): Promise<{ missionId: string | null; done: number; total: number; status: string | null }> {
+  const EMPTY = { missionId: null, done: 0, total: 0, status: null };
+  if (!supabaseConfigured || !supabase) return EMPTY;
+  const supaLakeId = getOrCreateSupabaseLakeId(lakeId);
+  const { data: missions, error: mErr } = await supabase
+    .from('missions')
+    .select('mission_id, status')
+    .eq('lake_id', supaLakeId)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (mErr || !missions || missions.length === 0) return EMPTY;
+  const m = missions[0] as { mission_id: string; status: string };
+  const { data: grids, error: gErr } = await supabase
+    .from('mission_grids')
+    .select('status')
+    .eq('mission_id', m.mission_id);
+  if (gErr) return { missionId: m.mission_id, done: 0, total: 0, status: m.status };
+  const total = grids?.length ?? 0;
+  const done = grids?.filter((g: { status: string }) => g.status === 'COMPLETED').length ?? 0;
+  return { missionId: m.mission_id, done, total, status: m.status };
 }
 
 /**
@@ -168,7 +259,8 @@ export async function fetchSessionStats(lakeId: string): Promise<{ sessions: num
 
 /**
  * Fetch the set of grid_id values that have at least one completed session
- * (completed_at IS NOT NULL). Used to mark "visited" cells on the heatmap.
+ * (completed_at IS NOT NULL) OR a COMPLETED mission_grids row.
+ * Used to mark "visited" cells on the heatmap.
  */
 export async function fetchVisitedGridIds(lakeId: string): Promise<Set<string>> {
   if (!supabaseConfigured || !supabase) return new Set();
@@ -179,13 +271,28 @@ export async function fetchVisitedGridIds(lakeId: string): Promise<Set<string>> 
     .eq('lake_id', supaLakeId);
   if (!grids || grids.length === 0) return new Set();
   const gridIds = grids.map((g: { grid_id: string }) => g.grid_id);
+  const visited = new Set<string>();
+
+  // 1. Completed sessions
   const { data: sessions } = await supabase
     .from('grid_sessions')
     .select('grid_id')
     .in('grid_id', gridIds)
     .not('completed_at', 'is', null);
-  if (!sessions) return new Set();
-  return new Set(sessions.map((s: { grid_id: string }) => s.grid_id));
+  if (sessions) {
+    for (const s of sessions as { grid_id: string }[]) visited.add(s.grid_id);
+  }
+
+  // 2. COMPLETED mission_grids rows
+  const { data: mGrids } = await supabase
+    .from('mission_grids')
+    .select('grid_id')
+    .in('grid_id', gridIds)
+    .eq('status', 'COMPLETED');
+  if (mGrids) {
+    for (const mg of mGrids as { grid_id: string }[]) visited.add(mg.grid_id);
+  }
+  return visited;
 }
 
 /**

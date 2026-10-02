@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, ChevronRight, Download, Waypoints } from 'lucide-react';
 import { Navbar } from '../components/Navbar';
@@ -9,7 +9,7 @@ import { useTelemetry } from '../stores/telemetry';
 import { DEMO } from '../demo/demo';
 import { planCoverage } from '../utils/geo';
 import { downloadText, planFileName, planToCsv, planToGeoJson } from '../utils/exportPlan';
-import { pushLakeAndGrids } from '../services/supabase/supabaseService';
+import { pushLakeAndGrids, createMission, fetchMissionProgress } from '../services/supabase/supabaseService';
 
 /** Cruise speed used ONLY to estimate mission time (m/s). */
 const PLANNING_SPEED_MPS = 0.8;
@@ -19,6 +19,22 @@ export function MissionPage() {
   const { telemetry } = useTelemetry();
   const [notice, setNotice] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [progress, setProgress] = useState<{ missionId: string | null; done: number; total: number; status: string | null }>({ missionId: null, done: 0, total: 0, status: null });
+
+  // Poll mission progress every 8 seconds while a lake is selected.
+  useEffect(() => {
+    if (!lake) return;
+    const load = async () => {
+      try {
+        const p = await fetchMissionProgress(lake.id);
+        setProgress(p);
+      } catch { /* silent background poll */ }
+    };
+    load();
+    const id = window.setInterval(load, 8000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lake?.id]);
 
   // Every leg is checked against the shore and islands; legs that would cross land are rerouted.
   const plan = useMemo(() => planCoverage(cells, boundary, holes), [cells, boundary, holes]);
@@ -48,8 +64,26 @@ export function MissionPage() {
     setSyncing(true);
     setNotice(null);
     try {
-      await pushLakeAndGrids(lake, cells, cellSizeM);
-      setNotice('Grid points sent to Supabase. The robot command channel (MQTT) is not connected yet, so the mission itself cannot be started from here.');
+      const { lakeId, gridIds } = await pushLakeAndGrids(lake, cells, cellSizeM);
+      // Visit order: map each coverage-path waypoint to its nearest grid cell.
+      const remaining = new Set(cells.map((c) => c.id));
+      const ordered: string[] = [];
+      for (const wp of path) {
+        let best: string | null = null;
+        let bestD = Infinity;
+        for (const c of cells) {
+          if (!remaining.has(c.id)) continue;
+          const d = (c.center.lat - wp.lat) ** 2 + (c.center.lon - wp.lon) ** 2;
+          if (d < bestD) { bestD = d; best = c.id; }
+        }
+        if (best) {
+          remaining.delete(best);
+          ordered.push(best);
+        }
+      }
+      for (const c of cells) if (remaining.has(c.id)) ordered.push(c.id);
+      const missionId = await createMission(lakeId, gridIds, ordered);
+      setNotice(`Mission created (${ordered.length} cells). Mission ID: ${missionId.slice(0, 8)}… The robot command channel (MQTT) is not connected yet, so the mission itself cannot be started from here.`);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : 'Could not sync to Supabase.');
     } finally {
@@ -74,6 +108,21 @@ export function MissionPage() {
             <dl className="kv-rows">
   <div><dt><Waypoints size={18} />Waypoints</dt><dd>{hasPlan ? path.length : '—'}</dd></div>
 </dl>
+
+            {progress.total > 0 && (
+              <div className="mission-progress">
+                <div className="mission-progress-head">
+                  <span>{progress.status ?? 'PENDING'}</span>
+                  <span>{progress.done} / {progress.total} cells</span>
+                </div>
+                <div className="mission-progress-bar">
+                  <div
+                    className="mission-progress-fill"
+                    style={{ width: `${progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0}%` }}
+                  />
+                </div>
+              </div>
+            )}
 
             <button type="button" className="btn-primary btn-block" onClick={handleStartMission} disabled={syncing}>
               {syncing ? 'Syncing to Supabase…' : <>Start Mission <ArrowRight size={15} /></>}

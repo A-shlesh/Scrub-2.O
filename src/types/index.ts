@@ -270,3 +270,31 @@ export interface RobotStatus {
   online: boolean;
   lastSeenAt: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Autonomous missions (Part: missions + mission_grids tables)
+// ---------------------------------------------------------------------------
+
+export type MissionStatus = 'PENDING' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'ABORTED';
+
+export type MissionGridStatus = 'PENDING' | 'NAVIGATING' | 'COLLECTING' | 'COMPLETED' | 'SKIPPED';
+
+export interface Mission {
+  mission_id: string;
+  device_id: string;
+  lake_id: string;
+  status: MissionStatus;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  notes: string | null;
+}
+
+export interface MissionGrid {
+  mission_grid_id: string;
+  mission_id: string;
+  grid_id: string;
+  sequence_order: number;
+  status: MissionGridStatus;
+  session_id: string | null;
+}
