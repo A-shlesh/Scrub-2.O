@@ -601,6 +601,27 @@ button { cursor: pointer; }
   box-shadow: 0 2px 8px rgb(0 0 0 / 0.4);
 }
 
+.gcs-marker {
+  border-radius: 8px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+.gcs-row {
+  display: flex;
+  gap: 8px;
+}
+
+.gcs-row .btn {
+  flex: 1;
+}
+
+.gcs-coords {
+  font-size: 12px;
+  color: var(--muted);
+  margin: -4px 0 4px;
+}
+
 /* Leaflet controls: separate rounded white tiles, as in the mockup */
 .map-wrap .leaflet-bar {
   border: 0;

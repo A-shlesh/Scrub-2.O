@@ -69,17 +69,29 @@ Rules the Pi must enforce itself (never rely on the dashboard):
   "lake_name": "Kengeri Lake",
   "generated_at": "2026-11-05T09:12:00.000Z",
   "cell_size_m": 20,
-  "count": 240,
+  "gcs": { "lat": 12.9139000, "lon": 77.4812000 },
+  "count": 242,
   "sha256": "5e88…",
   "waypoints": [
-    { "seq": 1, "lat": 12.9145123, "lon": 77.4820456, "type": "lane", "grid_id": "c0ffee…" },
-    { "seq": 2, "lat": 12.9146921, "lon": 77.4820456, "type": "detour", "grid_id": "beef…" }
+    { "seq": 1, "lat": 12.9139000, "lon": 77.4812000, "type": "gcs", "grid_id": null },
+    { "seq": 2, "lat": 12.9145123, "lon": 77.4820456, "type": "lane", "grid_id": "c0ffee…" },
+    { "seq": 3, "lat": 12.9146921, "lon": 77.4820456, "type": "detour", "grid_id": "beef…" },
+    …
+    { "seq": 242, "lat": 12.9139000, "lon": 77.4812000, "type": "gcs", "grid_id": null }
   ]
 }
 ```
 
 - `waypoints` are in visiting order (the zigzag route), `seq` from 1.
-- `type`: `lane` = sampling cell on the zigzag, `detour` = extra point to stay in water.
+- `type`: `gcs` = ground control station, `lane` = sampling cell on the zigzag,
+  `detour` = extra point to stay in water.
+- `gcs` is where the robot is launched. The first and the last waypoint are
+  always the GCS: the robot leaves from it, covers the polygon, then drives back
+  to it. Do not sample at `gcs` waypoints. The legs to and from the GCS are
+  straight lines and are not checked against the shore (the GCS is usually on
+  the bank), so place it where the robot can reach the water directly.
+- While driving from the last sampling cell back to the GCS, report
+  `mission_state: "returning"`; report `completed` only after reaching the GCS.
 - `grid_id`: the `grids` row of the cell, or null.
 - `lat`/`lon` have at most 7 decimals.
 
