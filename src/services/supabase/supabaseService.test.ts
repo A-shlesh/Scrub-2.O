@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { GridCell, SensorSample } from '../../types';
 import { generateGrid } from '../../utils/geo';
-import { computeGridAnalytics, gridGeometryKey, matchGridsToCells } from './supabaseService';
-import type { SupabaseGrid } from './supabaseService';
+import { computeGridAnalytics, readingToSample } from './supabaseService';
 
 const square = [
   { lat: 12.97, lon: 77.59 },
@@ -10,10 +9,6 @@ const square = [
   { lat: 12.972, lon: 77.592 },
   { lat: 12.972, lon: 77.59 },
 ];
-
-function rowsFor(cells: GridCell[], sizeM: number, idPrefix: string): SupabaseGrid[] {
-  return cells.map((c, i) => ({ gridId: `${idPrefix}-${i}`, gridCode: c.id, gridSizeM: sizeM, centerLat: c.center.lat, centerLon: c.center.lon }));
-}
 
 function sample(gridId: string, ph: number | null, session = 's1'): SensorSample {
   return {
@@ -33,33 +28,17 @@ function sample(gridId: string, ph: number | null, session = 's1'): SensorSample
   };
 }
 
-describe('gridGeometryKey', () => {
-  it('ignores sub-decimetre float noise but separates sizes and positions', () => {
-    expect(gridGeometryKey(20, 12.9700001, 77.59)).toBe(gridGeometryKey(20, 12.97000014, 77.59));
-    expect(gridGeometryKey(20, 12.97, 77.59)).not.toBe(gridGeometryKey(25, 12.97, 77.59));
-    expect(gridGeometryKey(20, 12.97, 77.59)).not.toBe(gridGeometryKey(20, 12.9701, 77.59));
-  });
-});
-
-describe('matchGridsToCells', () => {
-  it('matches rows of the current layout only, even when codes repeat across layouts', () => {
-    const cells20 = generateGrid(square, 20, { lakePrefix: 'KNG' });
-    const cells40 = generateGrid(square, 40, { lakePrefix: 'KNG' });
-    // Both layouts number their cells KNG001..., so codes collide.
-    expect(cells40[0].id).toBe(cells20[0].id);
-
-    const rows = [...rowsFor(cells20, 20, 'old'), ...rowsFor(cells40, 40, 'new')];
-    const matched = matchGridsToCells(rows, cells40, 40);
-
-    expect(matched.size).toBe(cells40.length);
-    for (const [gridId, cellId] of matched) {
-      expect(gridId.startsWith('new-')).toBe(true);
-      expect(cells40.some((c) => c.id === cellId)).toBe(true);
-    }
-  });
-
-  it('returns nothing when the lake has no stored rows', () => {
-    expect(matchGridsToCells([], generateGrid(square, 20), 20).size).toBe(0);
+describe('readingToSample', () => {
+  it('maps a sensor_readings row (heading, reading_id) to the page shape', () => {
+    const r = readingToSample({
+      reading_id: 'r1', mission_id: 'm1', device_id: 'BOT001', recorded_at: '2026-11-05T10:00:00Z', created_at: null,
+      latitude: 12.97, longitude: 77.59, heading: 142.5, ph: 7.2, tds: null, turbidity: 11, temperature_c: 27.9, humidity_percent: 64,
+    });
+    expect(r).toMatchObject({
+      sample_id: 'r1', mission_id: 'm1', device_id: 'BOT001', heading_deg: 142.5, grid_id: null, session_id: null,
+      latitude: 12.97, longitude: 77.59, ph: 7.2, tds: null, turbidity: 11, temperature_c: 27.9, humidity_percent: 64,
+      created_at: '2026-11-05T10:00:00Z',
+    });
   });
 });
 

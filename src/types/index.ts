@@ -301,7 +301,7 @@ export interface RobotStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Autonomous missions (Part: missions + mission_grids tables)
+// Autonomous missions (missions + mission_waypoints tables)
 // ---------------------------------------------------------------------------
 
 export type MissionStatus = 'PENDING' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'ABORTED';

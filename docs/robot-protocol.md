@@ -14,8 +14,8 @@ STM32 <──UART (every 2 s)── Raspberry Pi 5           └──> Supabase
 | Mission plan (polygon, GCS, waypoints) | dashboard → Pi | `POST /api/missions` |
 | Start, pause, resume, abort, return to GCS, emergency stop | dashboard → Pi | `POST /api/missions/{id}/...`, `POST /api/emergency-stop` |
 | Live telemetry + navigation state (every 2 s) | Pi → dashboard | WebSocket `/ws/telemetry` |
-| Sensor history (one record every 10 s) | Pi → Supabase → dashboard | `sensor_samples` rows |
-| Mission records and status | dashboard + Pi → Supabase | `missions` rows |
+| Sensor history (one record every 10 s) | Pi → Supabase → dashboard | `sensor_readings` rows |
+| Mission records, waypoints and status | dashboard + Pi → Supabase | `missions`, `mission_waypoints` rows |
 
 **Fallback without a Pi URL.** When `VITE_API_BASE_URL` is not set, the dashboard
 uses the Supabase channel instead: commands as rows in `robot_commands` and telemetry
@@ -24,7 +24,18 @@ over Supabase Realtime Broadcast (section 7). The payloads are the same.
 The robot id is `BOT001` unless the dashboard sets `VITE_ROBOT_ID`.
 All timestamps are ISO-8601 UTC (`...Z`).
 
-Apply the Supabase migrations in `supabase/migrations/` in name order.
+### Supabase tables used by the dashboard
+
+| table | columns |
+|---|---|
+| `lakes` | `lake_id`, `name`, `created_at` |
+| `missions` | `mission_id`, `device_id`, `lake_id`, `status`, `started_at`, `completed_at`, `created_at`, `notes`, `total_waypoints`, `current_waypoint_index` |
+| `mission_waypoints` | `waypoint_id`, `mission_id`, `sequence_order`, `latitude`, `longitude`, `status`, `created_at` |
+| `sensor_readings` | `reading_id`, `mission_id`, `device_id`, `recorded_at`, `created_at`, `latitude`, `longitude`, `heading`, `ph`, `tds`, `turbidity`, `temperature_c`, `humidity_percent` |
+
+There is no `robot_commands` table in this project, so commands always go to the Pi
+backend (set `VITE_API_BASE_URL`). The SQL files in `supabase/migrations/` describe the
+previous project's schema and are not needed for this one.
 
 ## 1. REST API (Raspberry Pi backend)
 
@@ -180,23 +191,21 @@ The frame is the STM32 packet (section 6) forwarded unchanged, plus the Pi's own
 The older flat format (`lat`, `lon`, `heading_deg`, `ph`, `mission_state`,
 `waypoint_index`, …) is still accepted.
 
-## 4. Sensor history: `sensor_samples`, every 10 s
+## 4. Sensor history: `sensor_readings`, every 10 s
 
-Store every 2 s STM32 packet in SQLite. Every 10 s create **one** sensor record,
-locally and in Supabase `sensor_samples`:
+Store every 2 s STM32 packet in SQLite. Every 10 s create **one** sensor reading,
+locally and in Supabase `sensor_readings`:
 
 | column | value |
 |---|---|
-| `sample_id` | uuid generated **on the Pi**; upload with upsert so a retry never duplicates |
+| `reading_id` | uuid generated **on the Pi**; upload with upsert so a retry never duplicates |
 | `device_id` | `BOT001` |
 | `mission_id` | current mission, or null |
 | `recorded_at` | time of the reading (not of the upload) |
 | `latitude`, `longitude` | GPS position of the reading |
-| `heading_deg` | compass heading |
+| `heading` | compass heading, degrees |
 | `ph`, `tds`, `turbidity`, `temperature_c`, `humidity_percent` | sensor values |
-| `grid_id`, `session_id` | null (grids are not used for navigation) |
 
-`position` (PostGIS point) is filled by the database from latitude/longitude.
 Keep a "not yet uploaded" flag in SQLite and retry in order until it succeeds.
 
 The dashboard's **History** page reads these rows by mission and time range
@@ -205,12 +214,13 @@ last 30 minutes.
 
 ## 5. Mission status in Supabase
 
-The dashboard creates the `missions` row (status `PENDING`, plus the plan: GCS,
-polygon, sweep spacing, waypoint count, checksum and the full payload in `plan`)
-before sending the plan. The Pi keeps `missions.status` current:
+Before sending the plan, the dashboard creates the `missions` row (status `PENDING`,
+`total_waypoints`) and one `mission_waypoints` row per waypoint (`sequence_order` 0 =
+GCS, status `PENDING`). The Pi keeps `missions.status` current:
 `PENDING` → `ACTIVE` → `PAUSED` ↔ `ACTIVE` → `COMPLETED`, or `ABORTED` after abort /
-emergency stop (reason in `notes`), and sets `started_at`, `completed_at` and
-`current_waypoint`. Use the service-role key on the Pi only.
+emergency stop (reason in `notes`), sets `started_at`, `completed_at` and
+`current_waypoint_index`, and marks each `mission_waypoints` row `REACHED` when it gets
+there. Use the service-role key on the Pi only.
 
 ## 6. Hardware packets (handled by the Pi, unchanged)
 
@@ -257,7 +267,7 @@ Raspberry Pi → STM32, every 2 s:
 
 Grids are reserved for analysing the stored records, never for navigation. Because
 every record keeps its GPS position, time and mission, the lake polygon can later be
-divided into cells and each record assigned to the cell containing it
+divided into cells and each reading assigned to the cell containing it
 (`src/utils/gridAnalysis.ts`: `classifyByPosition`, `averageByCell`), then averaged
-per cell for a colour-coded water-quality heatmap. The PostGIS `position` column
-allows the same grouping in SQL (`ST_Contains(cell, position)`).
+per cell for a colour-coded water-quality heatmap. The Analytics page already does
+this from `sensor_readings`.

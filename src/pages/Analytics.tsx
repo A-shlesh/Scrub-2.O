@@ -5,14 +5,8 @@ import { ObservatoryMap } from '../components/ObservatoryMap';
 import { PageHeader } from '../components/PageHeader';
 import { useLake } from '../stores/lake';
 import { DEMO } from '../demo/demo';
-import {
-  computeGridAnalytics,
-  fetchLakeGrids,
-  fetchSensorSamples,
-  fetchVisitedGridIds,
-  matchGridsToCells,
-  SENSORS,
-} from '../services/supabase/supabaseService';
+import { computeGridAnalytics, fetchLakeReadings, SENSORS } from '../services/supabase/supabaseService';
+import { classifyByPosition } from '../utils/gridAnalysis';
 import type { GridAnalytics, GridCell, GridCellAverage, Lake, SensorAverage, SensorKey } from '../types';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -26,33 +20,20 @@ type RangeLabel = (typeof RANGES)[number]['label'];
 const REFRESH_MS = 10_000; // the robot uploads one sensor record every 10 s
 
 /**
- * Load analytics for the grid currently shown. Heatmap cells are the Supabase grid rows
- * that match a cell on screen (same size and centre), keyed by the local cell id.
- * Sensor cards cover the whole lake's history, except for a sample polygon, which shares
- * its parent lake's rows and so only counts its own cells.
+ * Load analytics for the grid currently shown. Every sensor reading taken during this lake's
+ * missions is placed in the cell that contains its GPS position, then averaged per cell.
+ * Sensor cards cover the whole lake's readings, except for a sample polygon, which shares
+ * its parent lake's missions and so only counts readings inside its own cells.
  */
-async function loadLakeAnalytics(
-  lake: Lake,
-  cells: GridCell[],
-  cellSizeM: number,
-  sinceMs: number | null,
-): Promise<{ analytics: GridAnalytics; visited: Set<string> }> {
-  const grids = await fetchLakeGrids(lake);
-  const shown = matchGridsToCells(grids, cells, cellSizeM); // grid_id -> local cell id
-  const cellById = new Map(cells.map((c) => [c.id, c]));
-  const shownIds = [...shown.keys()];
-  const summaryIds = lake.parentLakeId ? shownIds : grids.map((g) => g.gridId);
-  const [samples, visitedGridIds] = await Promise.all([fetchSensorSamples(summaryIds, sinceMs), fetchVisitedGridIds(shownIds)]);
-  const heatCells = shownIds.map((gridId) => {
-    const cell = cellById.get(shown.get(gridId) as string) as GridCell;
-    return { gridId, gridCode: cell.id, centerLat: cell.center.lat, centerLon: cell.center.lon };
-  });
-  const visited = new Set<string>();
-  for (const id of visitedGridIds) {
-    const cellId = shown.get(id);
-    if (cellId) visited.add(cellId);
-  }
-  return { analytics: computeGridAnalytics(lake.id, samples, heatCells), visited };
+async function loadLakeAnalytics(lake: Lake, cells: GridCell[], sinceMs: number | null): Promise<GridAnalytics> {
+  const readings = await fetchLakeReadings(lake, sinceMs);
+  const cellOf = classifyByPosition(readings, cells);
+  const placed = readings.map((r) => ({ ...r, grid_id: cellOf.get(r.sample_id) ?? null }));
+  const withData = new Set(placed.map((r) => r.grid_id).filter((id): id is string => id !== null));
+  const heatCells = cells
+    .filter((c) => withData.has(c.id))
+    .map((c) => ({ gridId: c.id, gridCode: c.id, centerLat: c.center.lat, centerLon: c.center.lon }));
+  return computeGridAnalytics(lake.id, lake.parentLakeId ? placed.filter((r) => r.grid_id !== null) : placed, heatCells);
 }
 
 /** Interpolate between color stops based on value fraction (0–1). */
@@ -146,10 +127,9 @@ export function AnalyticsPage() {
         setVisitedGridIds(new Set());
       }
       try {
-        const r = await loadLakeAnalytics(lake, cells, cellSizeM, rangeMs === null ? null : Date.now() - rangeMs);
+        const r = await loadLakeAnalytics(lake, cells, rangeMs === null ? null : Date.now() - rangeMs);
         if (cancelled) return;
-        setAnalytics(r.analytics);
-        setVisitedGridIds(r.visited);
+        setAnalytics(r);
         setError(null);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Could not load analytics.');
@@ -202,7 +182,7 @@ export function AnalyticsPage() {
       <main className="page">
         <PageHeader
           title="Reclamation Analytics"
-          sub="Water quality per grid cell from Supabase sensor readings."
+          sub="Water quality per grid cell, from GPS-tagged sensor readings in Supabase."
           right={
             <label className="select-wrap">
               <span className="sr-only" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>Time range</span>
@@ -270,11 +250,11 @@ export function AnalyticsPage() {
                 <div className="v">{analytics.totalSamples}</div>
               </div>
               <div className="stat-card">
-                <div className="k">Sessions</div>
+                <div className="k">Missions</div>
                 <div className="v">{analytics.totalSessions}</div>
               </div>
               <div className="stat-card">
-                <div className="k">Grid Cells</div>
+                <div className="k">Cells with readings</div>
                 <div className="v">{analytics.cellAverages.length}</div>
               </div>
               <div className="stat-card">
