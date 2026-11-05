@@ -24,18 +24,12 @@ over Supabase Realtime Broadcast (section 7). The payloads are the same.
 The robot id is `BOT001` unless the dashboard sets `VITE_ROBOT_ID`.
 All timestamps are ISO-8601 UTC (`...Z`).
 
-### Supabase tables used by the dashboard
+### Supabase tables
 
-| table | columns |
-|---|---|
-| `lakes` | `lake_id`, `name`, `created_at` |
-| `missions` | `mission_id`, `device_id`, `lake_id`, `status`, `started_at`, `completed_at`, `created_at`, `notes`, `total_waypoints`, `current_waypoint_index` |
-| `mission_waypoints` | `waypoint_id`, `mission_id`, `sequence_order`, `latitude`, `longitude`, `status`, `created_at` |
-| `sensor_readings` | `reading_id`, `mission_id`, `device_id`, `recorded_at`, `created_at`, `latitude`, `longitude`, `heading`, `ph`, `tds`, `turbidity`, `temperature_c`, `humidity_percent` |
-
-There is no `robot_commands` table in this project, so commands always go to the Pi
-backend (set `VITE_API_BASE_URL`). The SQL files in `supabase/migrations/` describe the
-previous project's schema and are not needed for this one.
+Both repositories use the shared schema in `supabase/schema.sql`; table and column
+names, status values and who writes what are in [`supabase-schema.md`](supabase-schema.md).
+There is no command table, so commands always go to the Pi backend (set
+`VITE_API_BASE_URL`). `supabase/legacy/` holds the previous project's migrations.
 
 ## 1. REST API (Raspberry Pi backend)
 
@@ -198,11 +192,13 @@ locally and in Supabase `sensor_readings`:
 
 | column | value |
 |---|---|
-| `reading_id` | uuid generated **on the Pi**; upload with upsert so a retry never duplicates |
+| `reading_id` | new uuid |
+| `local_record_id` | the SQLite record's uuid; upload with upsert on it so a retry never duplicates |
 | `device_id` | `BOT001` |
 | `mission_id` | current mission, or null |
 | `recorded_at` | time of the reading (not of the upload) |
 | `latitude`, `longitude` | GPS position of the reading |
+| `position_geom` | the same position as `SRID=4326;POINT(lon lat)` |
 | `heading` | compass heading, degrees |
 | `ph`, `tds`, `turbidity`, `temperature_c`, `humidity_percent` | sensor values |
 
@@ -214,13 +210,12 @@ last 30 minutes.
 
 ## 5. Mission status in Supabase
 
-Before sending the plan, the dashboard creates the `missions` row (status `PENDING`,
-`total_waypoints`) and one `mission_waypoints` row per waypoint (`sequence_order` 0 =
-GCS, status `PENDING`). The Pi keeps `missions.status` current:
-`PENDING` → `ACTIVE` → `PAUSED` ↔ `ACTIVE` → `COMPLETED`, or `ABORTED` after abort /
-emergency stop (reason in `notes`), sets `started_at`, `completed_at` and
-`current_waypoint_index`, and marks each `mission_waypoints` row `REACHED` when it gets
-there. Use the service-role key on the Pi only.
+See [`supabase-schema.md`](supabase-schema.md), "Who writes what". In short:
+`PENDING` → `LOADING_WAYPOINTS` (dashboard) → `READY` with `waypoint_load_ack = true`
+(Pi, after SQLite storage) → `ACTIVE` ↔ `PAUSED` → `COMPLETED`, or `ABORTED` / `FAILED`.
+The Pi keeps `current_waypoint_index`, `progress_percent`, `started_at`, `completed_at`
+and each `mission_waypoints.status` (`ACTIVE`, `COMPLETED`, `SKIPPED`) current.
+Use the service-role key on the Pi only.
 
 ## 6. Hardware packets (handled by the Pi, unchanged)
 

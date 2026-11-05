@@ -34,7 +34,7 @@ import { ackMismatch, buildMissionPayload, canonicalWaypointText, toMissionWaypo
 import { loadGcs, loadSweepSpacing, rememberMissionId, saveGcs, saveSweepSpacing, supabaseLakeKey } from '../services/storage/lakeStorage';
 import type { LatLon, MissionState } from '../types';
 import { fmtMissionState } from '../utils/format';
-import { abandonMission, createMission, fetchLatestMission, pushLake } from '../services/supabase/supabaseService';
+import { abandonMission, createMission, fetchLatestMission, markMissionLoading, pushLake } from '../services/supabase/supabaseService';
 import type { LatestMission } from '../services/supabase/supabaseService';
 import { ROBOT_ID } from '../services/supabase/robotService';
 import { describeAnswer, robotLink } from '../services/robot/robotLink';
@@ -43,7 +43,7 @@ import type { PiMissionStatus } from '../services/robot/piApi';
 import { normaliseMissionState } from '../services/realtime/telemetryParser';
 import { supabaseConfigured } from '../services/supabase/supabaseClient';
 
-const NO_MISSION: LatestMission = { missionId: null, status: null, currentWaypoint: null, totalWaypoints: null };
+const NO_MISSION: LatestMission = { missionId: null, status: null, currentWaypoint: null, totalWaypoints: null, progressPercent: null, loadAck: false };
 
 /** A plan the robot confirmed it validated and stored, with the exact waypoints it confirmed. */
 interface LoadedPlan {
@@ -192,7 +192,8 @@ export function MissionPage() {
     cloud === 'PAUSED' ||
     (robotState !== null && ACTIVE_STATES.includes(robotState));
   const paused = robotState === 'paused' || cloud === 'PAUSED';
-  const finished = (robotState !== null && FINAL_STATES.includes(robotState)) || cloud === 'COMPLETED' || cloud === 'ABORTED';
+  const finished =
+    (robotState !== null && FINAL_STATES.includes(robotState)) || cloud === 'COMPLETED' || cloud === 'ABORTED' || cloud === 'FAILED';
 
   const exportInput = {
     lake,
@@ -262,6 +263,7 @@ export function MissionPage() {
         rememberMissionId(lake.id, missionId);
       }
 
+      if (recorded) void markMissionLoading(missionId);
       setBusy(`Sent ${payload.waypoint_count} waypoints. Waiting for the robot to validate and store them…`);
       const answer = await robotLink.loadMission(payload);
       if (answer.status !== 'ACKED') {
@@ -351,7 +353,9 @@ export function MissionPage() {
   const wpDone = liveForMission?.navigation?.completedWaypoints ?? piStatus?.completedWaypoints ?? null;
   const distToTarget = liveForMission?.navigation?.distanceToTargetM ?? null;
   const target = liveForMission?.navigation?.target ?? null;
-  const pct = (done: number, total: number) => `${total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0}%`;
+  const cloudPct = cloudWp?.progressPercent ?? null;
+  const pct = (done: number, total: number) =>
+    `${cloudPct !== null && !liveForMission ? Math.round(cloudPct) : total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0}%`;
   const gcsStatus =
     robotState === 'returning' ? 'Returning to GCS' : robotState === 'completed' ? 'Back at GCS' : started && !finished ? 'Not yet' : null;
   const canReach = robotLink.configured;

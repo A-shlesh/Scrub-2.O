@@ -304,7 +304,7 @@ export interface RobotStatus {
 // Autonomous missions (missions + mission_waypoints tables)
 // ---------------------------------------------------------------------------
 
-export type MissionStatus = 'PENDING' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'ABORTED';
+export type MissionStatus = 'PENDING' | 'LOADING_WAYPOINTS' | 'READY' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'ABORTED' | 'FAILED';
 
 export type MissionGridStatus = 'PENDING' | 'NAVIGATING' | 'COLLECTING' | 'COMPLETED' | 'SKIPPED';
 
