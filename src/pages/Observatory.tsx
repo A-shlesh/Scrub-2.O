@@ -12,7 +12,7 @@ import { useLake, isSampleId } from '../stores/lake';
 import { useTelemetry } from '../stores/telemetry';
 import { identifyWaterAt, reverseLocality } from '../services/osm/osmService';
 import type { MapStyle } from '../services/osm/osmService';
-import { getOrCreateSupabaseLakeId } from '../services/storage/lakeStorage';
+import { getOrCreateSupabaseLakeId, supabaseLakeKey } from '../services/storage/lakeStorage';
 import { DEMO, demoLocality, isDemoId } from '../demo/demo';
 import { fmtArea } from '../utils/format';
 import { openRing, polygonAreaSqM, ringCenter, scaleRing, simplifyRing, cellsToCsv, downloadCsv } from '../utils/geo';
@@ -447,7 +447,7 @@ export function ObservatoryPage() {
                     className="btn btn-block"
                     style={{ marginTop: 8 }}
                     onClick={() => {
-                      const supabaseLakeId = getOrCreateSupabaseLakeId(lake.id);
+                      const supabaseLakeId = getOrCreateSupabaseLakeId(supabaseLakeKey(lake));
                       const csv = cellsToCsv(cells, { lakeId: supabaseLakeId, cellSizeM });
                       const tag = (lake.name ?? 'lake').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
                       downloadCsv(csv, `${tag}_grid.csv`);

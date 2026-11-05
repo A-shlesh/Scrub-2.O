@@ -167,7 +167,9 @@ function rotY(x: number, y: number, cos: number, sin: number): number {
  * - `cellSizeM` is a physical dimension in metres (user-configurable).
  * - Cells are kept when their centre is inside the boundary, outside every island,
  *   and at least `shoreMarginM` from any shore/island edge.
- * - Cell ids are stable row/col identifiers ("R{row}C{col}").
+ * - Cell ids are sequential per lake ("{prefix}001", ...; "R{row}C{col}" without a prefix).
+ *   They are renumbered whenever the size, margin or boundary changes, so they are
+ *   labels, not identities: Supabase rows are matched by size and centre instead.
  */
 export function generateGrid(boundary: LatLon[], cellSizeM: number, opts: GridOptions = {}): GridCell[] {
   const bounds = polygonBounds(boundary);

@@ -57,7 +57,7 @@ photos using the same file names.
   lake you can draw one.
 - **Islands:** islands in the OSM outline are kept. No sampling point is placed on
   one, and the robot path is routed around them.
-- **Grid size:** slider, number field (10-1000 m) or presets. Each lake remembers
+- **Grid size:** slider, 8-80 m. Each lake remembers
   its own size. Mission Planner follows the same grid.
 - **Keep away from shore:** 0-100 m. Sampling points stay at least this far from the
   shore *and* from islands. Remembered per lake. Default is off (0).

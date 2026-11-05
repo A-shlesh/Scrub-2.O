@@ -48,10 +48,13 @@ export interface AirReading {
 
 export type MissionState =
   | 'idle'
+  | 'loaded'
   | 'transit'
   | 'sampling'
   | 'returning'
   | 'paused'
+  | 'completed'
+  | 'emergency_stop'
   | 'error'
   | 'unknown';
 
@@ -68,6 +71,8 @@ export interface Telemetry {
   missionId: string | null;
   missionState: MissionState;
   currentWaypoint: string | number | null;
+  /** number of waypoints in the loaded plan, when the robot reports it */
+  waypointTotal?: number | null;
 }
 
 // ---------------------------------------------------------------------------
