@@ -109,8 +109,17 @@ export class DemoRealtimeService implements RealtimeService {
       compass: { headingDeg: wobble(142, 2) },
       batteryPercent: o.batteryPercent ?? 82,
       missionId: null,
-      missionState: 'sampling',
-      currentWaypoint: null,
+      // 'idle' so the Mission page can be tried out; the navigation fields still show on Telemetry.
+      missionState: 'idle',
+      currentWaypoint: 5 + (Math.floor(this.seq / 10) % 30),
+      waypointTotal: 42,
+      motors: { left: 100, right: this.seq % 6 < 3 ? 100 : 60 },
+      navigation: {
+        target: { lat: c.lat + 0.0003, lon: c.lon + 0.0004 },
+        distanceToTargetM: wobble(8, 1.5),
+        completedWaypoints: 4 + (Math.floor(this.seq / 10) % 30),
+        progress: null,
+      },
     };
     this.conn = { status: 'connected', lastMessageAt: now, detail: 'Demo mode' };
     this.tl.forEach((fn) => fn(this.last as Telemetry));

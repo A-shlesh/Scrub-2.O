@@ -1,66 +1,84 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { BatteryMedium, ChevronRight, Clock, Crosshair, Download, House, LocateFixed, OctagonX, Pause, Play, Send, Square, Undo2, Waypoints, X } from 'lucide-react';
+import {
+  BatteryMedium,
+  ChevronRight,
+  Clock,
+  Crosshair,
+  Download,
+  House,
+  LocateFixed,
+  MoveHorizontal,
+  OctagonX,
+  Pause,
+  Play,
+  Ruler,
+  Send,
+  Square,
+  Undo2,
+  Waypoints,
+  X,
+} from 'lucide-react';
 import { Navbar } from '../components/Navbar';
 import { ObservatoryMap } from '../components/ObservatoryMap';
 import { PageHeader } from '../components/PageHeader';
 import { useLake } from '../stores/lake';
 import { useTelemetry } from '../stores/telemetry';
 import { DEMO } from '../demo/demo';
-import { pathLengthM, planCoverage } from '../utils/geo';
+import { pathLengthM, polygonAreaSqM } from '../utils/geo';
+import { MIN_SPACING_M, planMissionRoute } from '../utils/coverage';
 import { estimateMission, fmtMinutes, startProblems } from '../utils/readiness';
-import { ROBOT_SPEED_MPS } from '../config/robot';
+import { ACCEPTANCE_RADIUS_M, ROBOT_SPEED_MPS, SWEEP_SPACING_M } from '../config/robot';
 import { downloadText, planFileName, planToCsv, planToGeoJson } from '../utils/exportPlan';
-import { buildWaypointsFile, canonicalWaypointText, cellIdsForPath, planWaypoints, routeWithGcs } from '../utils/waypoints';
-import { loadGcs, saveGcs, supabaseLakeKey } from '../services/storage/lakeStorage';
-import type { LatLon } from '../types';
+import { ackMismatch, buildMissionPayload, canonicalWaypointText, toMissionWaypoints } from '../utils/missionPayload';
+import { loadGcs, loadSweepSpacing, rememberMissionId, saveGcs, saveSweepSpacing, supabaseLakeKey } from '../services/storage/lakeStorage';
+import type { LatLon, MissionState } from '../types';
 import { fmtMissionState } from '../utils/format';
-import {
-  abandonMission,
-  createMission,
-  fetchCompletedMissionGrids,
-  fetchGcs,
-  fetchLakeGrids,
-  fetchMissionProgress,
-  matchGridsToCells,
-  pushLakeAndGrids,
-  saveGcsRemote,
-} from '../services/supabase/supabaseService';
-import type { MissionProgress } from '../services/supabase/supabaseService';
-import { command, describeAnswer, ROBOT_ID } from '../services/supabase/robotService';
-import type { RobotCommand } from '../services/supabase/robotService';
+import { abandonMission, createMission, fetchGcs, fetchLatestMission, pushLake, saveGcsRemote } from '../services/supabase/supabaseService';
+import type { LatestMission } from '../services/supabase/supabaseService';
+import { ROBOT_ID } from '../services/supabase/robotService';
+import { describeAnswer, robotLink } from '../services/robot/robotLink';
+import type { MissionCommand } from '../services/robot/robotLink';
+import type { PiMissionStatus } from '../services/robot/piApi';
+import { normaliseMissionState } from '../services/realtime/telemetryParser';
 import { supabaseConfigured } from '../services/supabase/supabaseClient';
 
-const NO_PROGRESS: MissionProgress = { missionId: null, done: 0, total: 0, status: null };
-const DONE_COLOR = '#16a34a';
+const NO_MISSION: LatestMission = { missionId: null, status: null };
 
-/** A plan the robot confirmed it stored, with the exact waypoints it confirmed. */
+/** A plan the robot confirmed it validated and stored, with the exact waypoints it confirmed. */
 interface LoadedPlan {
   lakeId: string;
   missionId: string;
   planSig: string;
   count: number;
-  sha256: string;
 }
 
 type Notice = { tone: 'ok' | 'error' | 'info'; text: string };
 
+const ACTIVE_STATES: MissionState[] = ['transit', 'sampling', 'returning', 'paused'];
+const FINAL_STATES: MissionState[] = ['completed', 'aborted', 'emergency_stop'];
+
 export function MissionPage() {
-  const { lake, cells, cellSizeM, shoreMarginM, boundary, holes, gridTooFine } = useLake();
-  const { telemetry, live } = useTelemetry();
+  const { lake, shoreMarginM, boundary, holes } = useLake();
+  const { telemetry, live, trail } = useTelemetry();
+  const useCloud = supabaseConfigured && !DEMO;
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [loaded, setLoaded] = useState<LoadedPlan | null>(null);
   const [startedMissionId, setStartedMissionId] = useState<string | null>(null);
-  const [lastAckState, setLastAckState] = useState<string | null>(null);
-  const [progress, setProgress] = useState<MissionProgress>(NO_PROGRESS);
-  const [progressKey, setProgressKey] = useState(0);
+  const [lastAckState, setLastAckState] = useState<MissionState | null>(null);
+  const [latest, setLatest] = useState<LatestMission>(NO_MISSION);
+  const [piStatus, setPiStatus] = useState<PiMissionStatus | null>(null);
+  const [backendUp, setBackendUp] = useState<boolean | null>(null);
+  const [pollKey, setPollKey] = useState(0);
   const [gcs, setGcs] = useState<LatLon | null>(null);
   const [placingGcs, setPlacingGcs] = useState(false);
+  const [spacingM, setSpacingM] = useState(SWEEP_SPACING_M);
+  const [spacingText, setSpacingText] = useState(String(SWEEP_SPACING_M));
 
-  // One GCS per real lake (sample polygons use their lake's). Supabase is the shared copy,
-  // so every device sees the same point; this browser keeps a copy for offline use.
+  // One GCS and one sweep spacing per real lake (sample polygons use their lake's).
+  // Supabase holds the shared GCS so every device sees the same point; this browser keeps a copy.
   useEffect(() => {
     setPlacingGcs(false);
     if (!lake) {
@@ -68,7 +86,11 @@ export function MissionPage() {
       return;
     }
     const key = supabaseLakeKey(lake);
+    const sp = loadSweepSpacing(key) ?? SWEEP_SPACING_M;
+    setSpacingM(sp);
+    setSpacingText(String(sp));
     setGcs(loadGcs(key) ?? loadGcs(lake.id));
+    if (!useCloud) return;
     let cancelled = false;
     fetchGcs(lake).then((remote) => {
       if (cancelled || remote === undefined) return;
@@ -87,22 +109,33 @@ export function MissionPage() {
     if (lake.parentLakeId) saveGcs(lake.id, null);
     setGcs(p);
     setPlacingGcs(false);
-    if (supabaseConfigured && !DEMO && !(await saveGcsRemote(lake, p))) {
-      setNotice({ tone: 'info', text: 'GCS saved in this browser. It is shared with other devices once the plan has been sent to the robot.' });
+    if (useCloud && !(await saveGcsRemote(lake, p))) {
+      setNotice({ tone: 'info', text: 'GCS saved in this browser. It is shared with other devices once a plan has been sent to the robot.' });
     }
   };
 
-  // Poll mission progress every 8 seconds while a lake is selected.
+  const commitSpacing = (text: string) => {
+    const v = Number(text);
+    if (!Number.isFinite(v) || v < MIN_SPACING_M) {
+      setSpacingText(String(spacingM));
+      return;
+    }
+    const rounded = Math.round(v * 10) / 10;
+    setSpacingM(rounded);
+    setSpacingText(String(rounded));
+    if (lake) saveSweepSpacing(supabaseLakeKey(lake), rounded);
+  };
+
+  // Mission status as stored in Supabase (kept by the robot), every 8 s.
   useEffect(() => {
-    setProgress(NO_PROGRESS);
-    if (!lake) return;
+    setLatest(NO_MISSION);
+    if (!lake || !useCloud) return;
     let cancelled = false;
-    const load = async () => {
-      try {
-        const p = await fetchMissionProgress(lake);
-        if (!cancelled) setProgress(p);
-      } catch { /* silent background poll; the next tick retries */ }
-    };
+    const load = () =>
+      fetchLatestMission(lake).then(
+        (m) => !cancelled && setLatest(m),
+        () => undefined, // silent background poll; the next tick retries
+      );
     load();
     const id = window.setInterval(load, 8000);
     return () => {
@@ -110,67 +143,101 @@ export function MissionPage() {
       window.clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lake?.id, lake?.parentLakeId, progressKey]);
+  }, [lake?.id, lake?.parentLakeId, pollKey]);
 
-  // Every leg is checked against the shore and islands; legs that would cross land are rerouted.
-  const plan = useMemo(() => planCoverage(cells, boundary, holes), [cells, boundary, holes]);
-  const path = plan.path;
-  const blockedLegs = plan.blocked.length;
-  const hasPlan = path.length > 0;
-  /** Full route: GCS -> coverage path -> GCS. */
-  const route = useMemo(() => routeWithGcs(plan, gcs, { cells, boundary, holes }), [plan, gcs, cells, boundary, holes]);
-  const mapDetours = useMemo(() => (route.returnDetour ? [...plan.detours, route.returnDetour] : plan.detours), [plan.detours, route]);
-  const estimate = useMemo(
-    () => (hasPlan ? estimateMission(pathLengthM(route.path), route.kinds.filter((k) => k === 'lane').length) : null),
-    [hasPlan, route],
+  const loadedHere = loaded && lake && loaded.lakeId === lake.id ? loaded : null;
+  const missionId = loadedHere?.missionId ?? latest.missionId;
+
+  // Robot-side state straight from the Pi backend, every 5 s; also tells us whether the backend is reachable.
+  useEffect(() => {
+    setPiStatus(null);
+    if (robotLink.kind !== 'pi') return;
+    let cancelled = false;
+    const load = async () => {
+      const up = await robotLink.health();
+      if (cancelled) return;
+      setBackendUp(up);
+      if (!missionId || !up) return;
+      try {
+        const st = await robotLink.missionStatus(missionId);
+        if (!cancelled) setPiStatus(st);
+      } catch {
+        /* next tick retries */
+      }
+    };
+    void load();
+    const id = window.setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [missionId, pollKey]);
+
+  /** GCS -> zigzag over the polygon -> GCS; every leg checked against the shore and islands. */
+  const route = useMemo(
+    () => planMissionRoute({ boundary, holes, spacingM, marginM: shoreMarginM, gcs }),
+    [boundary, holes, spacingM, shoreMarginM, gcs],
   );
-  /** Coverage part of the route (in the direction the robot drives it), for the map. */
-  const mapPath = useMemo(() => (gcs && route.path.length > 2 ? route.path.slice(1, -1) : path), [gcs, route, path]);
+  const hasPlan = route.path.length > 0;
+  const estimate = useMemo(() => (hasPlan ? estimateMission(pathLengthM(route.path)) : null), [hasPlan, route]);
+  const areaHa = useMemo(() => (boundary ? (polygonAreaSqM(boundary) ?? 0) / 10_000 : null), [boundary]);
   /** Identifies the route on screen; a loaded plan only counts while the route is unchanged. */
-  const planSig = useMemo(() => canonicalWaypointText(planWaypoints(route, cells, new Map())), [route, cells]);
+  const planSig = useMemo(() => canonicalWaypointText(toMissionWaypoints(route.path, route.kinds)), [route]);
+  const loadedValid = loadedHere !== null && loadedHere.planSig === planSig;
 
   const lat = telemetry?.gps.latitude ?? null;
   const lon = telemetry?.gps.longitude ?? null;
   const robot = useMemo(() => (lat !== null && lon !== null ? { lat, lon } : null), [lat, lon]);
 
-  const loadedHere = loaded && lake && loaded.lakeId === lake.id ? loaded : null;
-  const loadedValid = loadedHere !== null && loadedHere.planSig === planSig;
-  const missionId = loadedHere?.missionId ?? progress.missionId;
-
-  // What the robot says it is doing for this mission: live telemetry first, else its last acknowledgement.
+  // What the robot says it is doing for this mission: live telemetry, then the Pi's mission
+  // status, then its last acknowledgement. Never assumed from a request having been sent.
   const liveForMission = live && telemetry && (!missionId || telemetry.missionId === missionId) ? telemetry : null;
-  const robotState = liveForMission ? liveForMission.missionState : lastAckState;
+  const piState = piStatus ? normaliseMissionState(piStatus.state) : 'unknown';
+  const robotState: MissionState | null = liveForMission
+    ? liveForMission.missionState
+    : piState !== 'unknown'
+      ? piState
+      : lastAckState;
+  const cloud = latest.missionId === missionId ? latest.status : null;
   const started =
-    (missionId !== null && startedMissionId === missionId) || progress.status === 'ACTIVE' || progress.status === 'PAUSED';
-  const paused = robotState === 'paused' || progress.status === 'PAUSED';
-  const finished =
-    robotState === 'completed' || robotState === 'emergency_stop' || progress.status === 'COMPLETED' || progress.status === 'ABORTED';
+    (missionId !== null && startedMissionId === missionId) ||
+    cloud === 'ACTIVE' ||
+    cloud === 'PAUSED' ||
+    (robotState !== null && ACTIVE_STATES.includes(robotState));
+  const paused = robotState === 'paused' || cloud === 'PAUSED';
+  const finished = (robotState !== null && FINAL_STATES.includes(robotState)) || cloud === 'COMPLETED' || cloud === 'ABORTED';
 
-  const exportInput = { lake, boundary, holes, plan, cellSizeM, shoreMarginM, speedMps: ROBOT_SPEED_MPS, seconds: null };
+  const exportInput = {
+    lake,
+    boundary,
+    holes,
+    plan: route,
+    sweepSpacingM: spacingM,
+    shoreMarginM,
+    speedMps: ROBOT_SPEED_MPS,
+    seconds: estimate ? estimate.minutes * 60 : null,
+  };
   const problems = startProblems(telemetry, live, estimate);
   const exportGeoJson = () =>
     downloadText(planFileName(lake, 'geojson'), JSON.stringify(planToGeoJson(exportInput), null, 2), 'application/geo+json');
   const exportCsv = () => downloadText(planFileName(lake, 'csv'), planToCsv(exportInput), 'text/csv');
 
   /**
-   * Save the plan, create the mission, send waypoints.json and wait for the robot to confirm
-   * it stored them. Returns the mission id once the robot confirmed, else null.
+   * Generate a mission id, record the mission, send polygon + GCS + ordered waypoints and
+   * wait until the robot confirms it validated them and stored them in its local SQLite.
+   * Returns the mission id once confirmed (count and checksum match), else null.
    */
   const handleSend = async (): Promise<string | null> => {
-    if (blockedLegs > 0) {
-      setNotice({ tone: 'error', text: `${blockedLegs} leg${blockedLegs === 1 ? ' of this plan crosses' : 's of this plan cross'} land and cannot be routed. Fix the plan before sending it.` });
-      return null;
-    }
-    if (!lake || cells.length === 0 || !hasPlan) {
-      setNotice({ tone: 'error', text: 'Select a lake with a grid before sending a plan.' });
+    if (!lake || !boundary || !hasPlan) {
+      setNotice({ tone: 'error', text: route.error ?? 'Select a lake with an outline before sending a plan.' });
       return null;
     }
     if (!gcs) {
       setNotice({ tone: 'error', text: 'Set the GCS (start and return point) before sending the plan.' });
       return null;
     }
-    if (route.gcsWarnings.length > 0) {
-      setNotice({ tone: 'error', text: route.gcsWarnings[0] });
+    if (route.blocked.length > 0 || route.warnings.length > 0) {
+      setNotice({ tone: 'error', text: route.warnings[0] ?? 'Part of the route crosses land. Fix the plan before sending it.' });
       return null;
     }
     const sentSig = planSig;
@@ -178,47 +245,57 @@ export function MissionPage() {
     setLoaded(null);
     setStartedMissionId(null);
     setLastAckState(null);
-    let newMissionId: string | null = null;
+    const missionId = crypto.randomUUID();
+    let recorded = false;
     try {
-      setBusy('Saving the plan to Supabase…');
-      const { lakeId, gridIds } = await pushLakeAndGrids(lake, cells, cellSizeM);
-      void saveGcsRemote(lake, gcs); // the lake row exists now, so the GCS can be shared
-      // Visit order for mission_grids: lane cells in path order, then any cell not on the path.
-      const pathCells = cellIdsForPath(route.path, cells).filter((id, i): id is string => id !== null && route.kinds[i] === 'lane');
-      newMissionId = await createMission(lake.id, lakeId, gridIds, pathCells, ROBOT_ID);
-      setProgressKey((k) => k + 1);
-
-      const file = await buildWaypointsFile({
-        missionId: newMissionId,
-        deviceId: ROBOT_ID,
-        supabaseLakeId: lakeId,
-        lakeName: lake.name ?? null,
-        cellSizeM,
-        gcs,
-        waypoints: planWaypoints(route, cells, gridIds),
-      });
-
-      setBusy(`Sent ${file.count} waypoints. Waiting for the robot to confirm…`);
-      const answer = await command('LOAD_WAYPOINTS', newMissionId, file);
-      if (answer.status !== 'ACKED') {
-        await abandonMission(newMissionId, describeAnswer('LOAD_WAYPOINTS', answer));
-        setNotice({ tone: 'error', text: describeAnswer('LOAD_WAYPOINTS', answer) });
-        return null;
+      let supaLakeId: string | null = null;
+      if (useCloud) {
+        setBusy('Saving the mission to Supabase…');
+        supaLakeId = await pushLake(lake);
+        void saveGcsRemote(lake, gcs); // the lake row exists now, so the GCS can be shared
       }
-      const ackCount = Number(answer.ack?.count);
-      const ackSha = String(answer.ack?.sha256 ?? '');
-      if (ackCount !== file.count || ackSha !== file.sha256) {
-        const why = `Robot confirmed, but reported ${Number.isFinite(ackCount) ? ackCount : 'no'} waypoints${ackSha !== file.sha256 ? ' and a different checksum' : ''} (sent ${file.count}). Not safe to start: send the plan again.`;
-        await abandonMission(newMissionId, why);
+      const payload = await buildMissionPayload({
+        missionId,
+        deviceId: ROBOT_ID,
+        lakeId: supaLakeId,
+        lakeName: lake.name ?? null,
+        gcs,
+        polygon: boundary,
+        islands: holes,
+        sweepSpacingM: spacingM,
+        shoreMarginM,
+        acceptanceRadiusM: ACCEPTANCE_RADIUS_M,
+        path: route.path,
+        kinds: route.kinds,
+      });
+      if (useCloud && supaLakeId) {
+        await createMission(lake.id, supaLakeId, payload);
+        recorded = true;
+        setPollKey((k) => k + 1);
+      } else {
+        rememberMissionId(lake.id, missionId);
+      }
+
+      setBusy(`Sent ${payload.waypoint_count} waypoints. Waiting for the robot to validate and store them…`);
+      const answer = await robotLink.loadMission(payload);
+      if (answer.status !== 'ACKED') {
+        const why = describeAnswer('LOAD', answer);
+        if (recorded) await abandonMission(missionId, why);
         setNotice({ tone: 'error', text: why });
         return null;
       }
-      setLoaded({ lakeId: lake.id, missionId: newMissionId, planSig: sentSig, count: file.count, sha256: file.sha256 });
+      const mismatch = ackMismatch(payload, answer.ack);
+      if (mismatch) {
+        if (recorded) await abandonMission(missionId, mismatch);
+        setNotice({ tone: 'error', text: mismatch });
+        return null;
+      }
+      setLoaded({ lakeId: lake.id, missionId, planSig: sentSig, count: payload.waypoint_count });
       setLastAckState('loaded');
-      setNotice({ tone: 'ok', text: `Robot loaded all ${file.count} waypoints (checksum verified). You can start the mission.` });
-      return newMissionId;
+      setNotice({ tone: 'ok', text: `Robot stored all ${payload.waypoint_count} waypoints (checksum verified). You can start the mission.` });
+      return missionId;
     } catch (e) {
-      if (newMissionId) await abandonMission(newMissionId, 'Sending the waypoints failed.');
+      if (recorded) await abandonMission(missionId, 'Sending the waypoints failed.');
       setNotice({ tone: 'error', text: e instanceof Error ? e.message : 'Could not send the plan.' });
       return null;
     } finally {
@@ -227,21 +304,22 @@ export function MissionPage() {
   };
 
   /** Send a mission command and report the robot's answer. */
-  const run = async (cmd: Exclude<RobotCommand, 'LOAD_WAYPOINTS' | 'EMERGENCY_STOP'>, label: string, forMission: string | null = missionId) => {
+  const run = async (cmd: Exclude<MissionCommand, 'EMERGENCY_STOP'>, label: string, forMission: string | null = missionId) => {
     if (!forMission) return;
-    if (cmd === 'STOP' && !window.confirm('Stop the mission? The robot will end it and stay where it is. Use "Return to GCS" to bring it back.')) return;
+    if (cmd === 'STOP' && !window.confirm('Abort the mission? The robot stops and stays where it is. Use "Return to GCS" to bring it back.')) return;
     if (cmd === 'RETURN_HOME' && !window.confirm('End the mission and send the robot back to the GCS?')) return;
     setNotice(null);
     setBusy(label);
     try {
-      const answer = await command(cmd, forMission);
+      const answer = await robotLink.command(cmd, forMission);
       setNotice({ tone: answer.status === 'ACKED' ? 'ok' : 'error', text: describeAnswer(cmd, answer) });
       if (answer.status === 'ACKED') {
-        const state = typeof answer.ack?.mission_state === 'string' ? answer.ack.mission_state : null;
-        setLastAckState(state ?? (cmd === 'PAUSE' ? 'paused' : cmd === 'STOP' ? 'completed' : cmd === 'RETURN_HOME' ? 'returning' : 'transit'));
+        const reported = normaliseMissionState(answer.ack?.mission_state ?? answer.ack?.state);
+        const fallback: Record<typeof cmd, MissionState> = { START: 'transit', PAUSE: 'paused', RESUME: 'transit', STOP: 'aborted', RETURN_HOME: 'returning' };
+        setLastAckState(reported !== 'unknown' ? reported : fallback[cmd]);
         if (cmd === 'START') setStartedMissionId(forMission);
-        setProgressKey((k) => k + 1);
       }
+      setPollKey((k) => k + 1);
     } catch (e) {
       setNotice({ tone: 'error', text: e instanceof Error ? e.message : `Could not send ${cmd}.` });
     } finally {
@@ -250,15 +328,15 @@ export function MissionPage() {
   };
 
   /**
-   * One click: check the robot is ready, send the plan if the robot has not confirmed
-   * this exact plan yet, then start.
+   * START MISSION: check the robot is ready, send the plan unless the robot already
+   * confirmed this exact plan, and only then send the separate start command.
    */
   const sendAndStart = async () => {
     if (problems.length > 0) {
       const ok = window.confirm(`The robot may not be ready:\n\n- ${problems.join('\n- ')}\n\nStart anyway?`);
       if (!ok) return;
     }
-    const id = loadedValid && loadedHere ? loadedHere.missionId : await handleSend();
+    const id = loadedValid && loadedHere && !finished ? loadedHere.missionId : await handleSend();
     if (id) await run('START', 'Starting the mission…', id);
   };
 
@@ -266,10 +344,10 @@ export function MissionPage() {
   const emergencyStop = async () => {
     setStopping(true);
     try {
-      const answer = await command('EMERGENCY_STOP', missionId);
+      const answer = await robotLink.command('EMERGENCY_STOP', missionId);
       setNotice({ tone: answer.status === 'ACKED' ? 'ok' : 'error', text: describeAnswer('EMERGENCY_STOP', answer) });
       if (answer.status === 'ACKED') setLastAckState('emergency_stop');
-      setProgressKey((k) => k + 1);
+      setPollKey((k) => k + 1);
     } catch (e) {
       setNotice({ tone: 'error', text: `Emergency stop could not be sent: ${e instanceof Error ? e.message : String(e)}. Use the robot's kill switch.` });
     } finally {
@@ -277,20 +355,25 @@ export function MissionPage() {
     }
   };
 
-  const doneCells = useDoneCells(lake, cells, cellSizeM, missionId, progressKey, progress.done);
+  /** The GCS and the sweep spacing cannot change while the robot is running a mission. */
+  const locked = (started && !finished) || busy !== null;
 
-  /** The GCS cannot move while the robot is running a mission. */
-  const gcsLocked = (started && !finished) || busy !== null;
-
-  const liveWaypoint = liveForMission && typeof liveForMission.currentWaypoint === 'number' ? liveForMission.currentWaypoint : null;
-  const liveTotal = liveForMission?.waypointTotal ?? loadedHere?.count ?? null;
+  const wpNow = liveForMission?.currentWaypoint ?? piStatus?.currentWaypoint ?? null;
+  const wpIndex = typeof wpNow === 'number' ? wpNow : null;
+  const wpTotal = liveForMission?.waypointTotal ?? piStatus?.totalWaypoints ?? loadedHere?.count ?? null;
+  const wpDone = liveForMission?.navigation?.completedWaypoints ?? piStatus?.completedWaypoints ?? null;
+  const distToTarget = liveForMission?.navigation?.distanceToTargetM ?? null;
+  const target = liveForMission?.navigation?.target ?? null;
   const pct = (done: number, total: number) => `${total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0}%`;
+  const gcsStatus =
+    robotState === 'returning' ? 'Returning to GCS' : robotState === 'completed' ? 'Back at GCS' : started && !finished ? 'Not yet' : null;
+  const canReach = robotLink.configured;
 
   return (
     <>
       <Navbar />
       <main className="page">
-        <PageHeader title="Mission Planner" sub="Plan and execute autonomous cleaning missions." />
+        <PageHeader title="Mission Planner" sub="Plan and run polygon coverage missions: GCS → zigzag over the lake → GCS." />
 
         <div className="mission-layout">
           <section className="panel" aria-label="Mission summary">
@@ -298,13 +381,39 @@ export function MissionPage() {
               <h3>{missionId ? `Mission ${missionId.slice(0, 8)}` : 'New mission'}</h3>
               <span className="chev"><ChevronRight size={18} /></span>
             </div>
-            <p className="panel-sub">{lake ? `${lake.name ?? 'Unnamed lake'} · ${cellSizeM} m grid · robot ${ROBOT_ID}` : 'No lake selected'}</p>
+            <p className="panel-sub">
+              {lake ? `${lake.name ?? 'Unnamed lake'} · robot ${ROBOT_ID}` : 'No lake selected'}
+              {robotLink.kind === 'pi' && (
+                <span className={backendUp === false ? 'text-bad' : undefined}>
+                  {' · '}backend {backendUp === null ? 'checking…' : backendUp ? 'reachable' : 'unreachable'}
+                </span>
+              )}
+            </p>
 
             <dl className="kv-rows">
-              <div><dt><Waypoints size={18} />Waypoints</dt><dd>{hasPlan ? route.path.length : '—'}</dd></div>
+              {areaHa !== null && <div><dt><Ruler size={18} />Area</dt><dd>{areaHa < 10 ? areaHa.toFixed(2) : areaHa.toFixed(1)} ha</dd></div>}
+              <div>
+                <dt><MoveHorizontal size={18} /><label htmlFor="sweep-spacing">Sweep spacing</label></dt>
+                <dd>
+                  <input
+                    id="sweep-spacing"
+                    className="num-input"
+                    type="number"
+                    min={MIN_SPACING_M}
+                    step={0.5}
+                    value={spacingText}
+                    disabled={locked || !lake}
+                    onChange={(e) => setSpacingText(e.target.value)}
+                    onBlur={(e) => commitSpacing(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && commitSpacing((e.target as HTMLInputElement).value)}
+                    title="Distance between sweep lines: the robot's effective cleaning width"
+                  />{' '}m
+                </dd>
+              </div>
+              <div><dt><Waypoints size={18} />Waypoints</dt><dd>{hasPlan ? `${route.path.length} · ${route.sweeps} sweeps` : '—'}</dd></div>
               <div><dt><House size={18} />GCS</dt><dd>{gcs ? 'Set' : 'Not set'}</dd></div>
               {estimate && (
-                <div title={`At ${ROBOT_SPEED_MPS} m/s, including sampling stops`}>
+                <div title={`At ${ROBOT_SPEED_MPS} m/s`}>
                   <dt><Clock size={18} />Est. time</dt>
                   <dd>{fmtMinutes(estimate.minutes)} · {(estimate.distanceM / 1000).toFixed(1)} km</dd>
                 </div>
@@ -318,48 +427,33 @@ export function MissionPage() {
                 </div>
               )}
               <div><dt>Robot</dt><dd>{robotState ? fmtMissionState(robotState) : live ? 'Online' : 'No live data'}</dd></div>
+              {gcsStatus && <div><dt>Return to GCS</dt><dd>{gcsStatus}</dd></div>}
             </dl>
 
-            {liveWaypoint !== null && liveTotal ? (
+            {wpIndex !== null && wpTotal ? (
               <div className="mission-progress" aria-label="Waypoint progress">
                 <div className="mission-progress-head">
-                  <span>Waypoint</span>
-                  <span>{liveWaypoint} / {liveTotal}</span>
+                  <span>Waypoint {wpIndex} of {wpTotal}{wpDone !== null ? ` · ${wpDone} reached` : ''}</span>
+                  <span>{distToTarget !== null ? `${distToTarget.toFixed(1)} m to target` : pct(wpDone ?? wpIndex, wpTotal)}</span>
                 </div>
-                <div className="mission-progress-bar"><div className="mission-progress-fill" style={{ width: pct(liveWaypoint, liveTotal) }} /></div>
+                <div className="mission-progress-bar"><div className="mission-progress-fill" style={{ width: pct(wpDone ?? wpIndex, wpTotal) }} /></div>
               </div>
             ) : null}
-
-            {progress.total > 0 && (
-              <div className="mission-progress" aria-label="Cells sampled">
-                <div className="mission-progress-head">
-                  <span>{progress.status ?? 'PENDING'}</span>
-                  <span>{progress.done} / {progress.total} cells</span>
-                </div>
-                <div className="mission-progress-bar"><div className="mission-progress-fill" style={{ width: pct(progress.done, progress.total) }} /></div>
-              </div>
-            )}
 
             {lake && (
               <>
                 {gcs && <p className="gcs-coords">GCS {gcs.lat.toFixed(6)}, {gcs.lon.toFixed(6)} · robot starts here and returns here</p>}
                 <div className="gcs-row" role="group" aria-label="Ground control station">
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => setPlacingGcs((v) => !v)}
-                    disabled={gcsLocked}
-                    aria-pressed={placingGcs}
-                  >
+                  <button type="button" className="btn" onClick={() => setPlacingGcs((v) => !v)} disabled={locked} aria-pressed={placingGcs}>
                     <Crosshair size={15} /> {placingGcs ? 'Click the map…' : gcs ? 'Move GCS' : 'Set GCS on map'}
                   </button>
                   {robot && (
-                    <button type="button" className="btn" onClick={() => changeGcs(robot)} disabled={gcsLocked} title="Use the robot's current GPS position">
+                    <button type="button" className="btn" onClick={() => changeGcs(robot)} disabled={locked} title="Use the robot's current GPS position">
                       <LocateFixed size={15} /> Robot here
                     </button>
                   )}
-                  {gcs && loadGcs(lake.id) && (
-                    <button type="button" className="btn" onClick={() => changeGcs(null)} disabled={gcsLocked} aria-label="Clear GCS" title="Clear GCS">
+                  {gcs && (
+                    <button type="button" className="btn" onClick={() => changeGcs(null)} disabled={locked} aria-label="Clear GCS" title="Clear GCS">
                       <X size={15} />
                     </button>
                   )}
@@ -367,7 +461,8 @@ export function MissionPage() {
               </>
             )}
 
-            {route.gcsWarnings.map((w) => (
+            {lake && route.error && <div className="notice error" role="alert">{route.error}</div>}
+            {route.warnings.map((w) => (
               <div key={w} className="notice error" role="alert">{w}</div>
             ))}
             {(!started || finished) && hasPlan && problems.length > 0 && (
@@ -378,7 +473,7 @@ export function MissionPage() {
             )}
 
             {loadedHere && !loadedValid && !started && (
-              <div className="notice" role="status">The plan changed after the robot loaded it. Send it again before starting.</div>
+              <div className="notice" role="status">The plan changed after the robot stored it. Send it again before starting.</div>
             )}
 
             {!started || finished ? (
@@ -387,17 +482,12 @@ export function MissionPage() {
                   type="button"
                   className="btn-primary btn-block mission-start"
                   onClick={sendAndStart}
-                  disabled={busy !== null || !hasPlan || !gcs || !supabaseConfigured}
+                  disabled={busy !== null || !hasPlan || !gcs || !canReach}
                   title={gcs ? undefined : 'Set the GCS first'}
                 >
-                  <Play size={15} /> {loadedValid && !finished ? 'Start mission' : 'Send plan & start'}
+                  <Play size={15} /> {loadedValid && !finished ? 'Start mission' : 'Send plan & start mission'}
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-block"
-                  onClick={() => void handleSend()}
-                  disabled={busy !== null || !hasPlan || !gcs || !supabaseConfigured}
-                >
+                <button type="button" className="btn btn-block" onClick={() => void handleSend()} disabled={busy !== null || !hasPlan || !gcs || !canReach}>
                   <Send size={15} /> {loadedValid && !finished ? 'Send plan again' : 'Send plan only'}
                 </button>
               </>
@@ -412,24 +502,19 @@ export function MissionPage() {
                     <Pause size={15} /> Pause
                   </button>
                 )}
-                <button type="button" className="btn" onClick={() => run('STOP', 'Stopping…')} disabled={busy !== null}>
-                  <Square size={15} /> Stop
+                <button type="button" className="btn" onClick={() => run('STOP', 'Aborting…')} disabled={busy !== null}>
+                  <Square size={15} /> Abort
                 </button>
               </div>
             )}
 
-            {missionId && gcs && (started || robotState === 'completed') && robotState !== 'returning' && (
+            {missionId && gcs && (started || finished) && robotState !== 'returning' && robotState !== 'completed' && (
               <button type="button" className="btn btn-block" onClick={() => run('RETURN_HOME', 'Sending the robot back to the GCS…')} disabled={busy !== null}>
                 <Undo2 size={15} /> Return to GCS
               </button>
             )}
 
-            <button
-              type="button"
-              className="btn-danger btn-block"
-              onClick={emergencyStop}
-              disabled={stopping || !supabaseConfigured}
-            >
+            <button type="button" className="btn-danger btn-block" onClick={emergencyStop} disabled={stopping || !canReach}>
               <OctagonX size={16} /> {stopping ? 'Sending emergency stop…' : 'Emergency stop'}
             </button>
 
@@ -439,11 +524,11 @@ export function MissionPage() {
                 {notice.text}
               </div>
             )}
-            {!supabaseConfigured && !DEMO && (
-              <div className="notice" role="status">Supabase is not configured, so the robot cannot be reached.</div>
+            {!canReach && !DEMO && (
+              <div className="notice" role="status">No robot connection is configured (VITE_API_BASE_URL or Supabase), so the robot cannot be reached.</div>
             )}
 
-            <Link to="/observatory" className="btn btn-block">Edit Plan</Link>
+            <Link to="/observatory" className="btn btn-block">Edit lake polygon</Link>
             <div className="export-row" role="group" aria-label="Export plan">
               <button type="button" className="btn" onClick={exportGeoJson} disabled={!hasPlan}>
                 <Download size={15} /> GeoJSON
@@ -458,17 +543,18 @@ export function MissionPage() {
             <ObservatoryMap
               mode="browse"
               style="light"
-              gridCells={cells}
               showGrid={false}
-              plannedPath={mapPath}
+              plannedPath={route.coverage}
+              seqOffset={gcs ? 1 : 0}
               gcs={gcs}
+              returnLeg={route.returnLeg}
               addLakeMode={placingGcs}
               onPickPoint={placingGcs ? (p) => changeGcs(p) : undefined}
-              detours={mapDetours}
-              heatmapCells={doneCells.heat}
-              visitedGridIds={doneCells.ids}
-              blockedLegs={plan.blocked}
+              detours={route.transits}
+              blockedLegs={route.blocked}
               robot={robot}
+              trail={trail}
+              target={target}
               showLegend
               backTo="/"
             />
@@ -476,16 +562,10 @@ export function MissionPage() {
               <div className="map-hint"><span>Select a lake in the Observatory to plan a mission.</span></div>
             )}
             {placingGcs && (
-              <div className="map-hint"><span>Click the map where the robot is launched. It starts here and returns here after the last waypoint.</span></div>
+              <div className="map-hint"><span>Click the map where the robot is launched. It starts here and returns here after the last sweep.</span></div>
             )}
-            {lake && !hasPlan && !placingGcs && (
-              <div className="map-hint">
-                <span>
-                  {gridTooFine
-                    ? 'The grid is too fine to plan. Increase the grid size in the Observatory.'
-                    : 'No grid yet. Add a boundary for this lake in the Observatory.'}
-                </span>
-              </div>
+            {lake && !boundary && !placingGcs && (
+              <div className="map-hint"><span>No outline yet. Draw the lake polygon in the Observatory.</span></div>
             )}
           </div>
         </div>
@@ -493,55 +573,4 @@ export function MissionPage() {
       </main>
     </>
   );
-}
-
-type HeatCell = { gridCode: string; color: string; value: number | null };
-const NO_DONE: { heat: HeatCell[]; ids: Set<string> } = { heat: [], ids: new Set() };
-
-/** Cells of the mission the robot has finished sampling, for colouring the map; refreshed as progress changes. */
-function useDoneCells(
-  lake: ReturnType<typeof useLake>['lake'],
-  cells: ReturnType<typeof useLake>['cells'],
-  cellSizeM: number,
-  missionId: string | null,
-  refreshKey: number,
-  doneCount: number,
-) {
-  const [cellByGrid, setCellByGrid] = useState<Map<string, string> | null>(null);
-  const [done, setDone] = useState(NO_DONE);
-
-  // grid_id -> cell id for this lake, read once per lake and grid.
-  useEffect(() => {
-    setCellByGrid(null);
-    if (!lake || !supabaseConfigured || DEMO || cells.length === 0) return;
-    let cancelled = false;
-    fetchLakeGrids(lake).then((grids) => {
-      if (cancelled) return;
-      const toGrid = matchGridsToCells(grids, cells, cellSizeM);
-      setCellByGrid(new Map([...toGrid].map(([cellId, gridId]) => [gridId, cellId])));
-    }, () => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [lake, cells, cellSizeM]);
-
-  useEffect(() => {
-    setDone(NO_DONE);
-    if (!missionId || !cellByGrid || !supabaseConfigured || DEMO) return;
-    let cancelled = false;
-    fetchCompletedMissionGrids(missionId).then((gridIds) => {
-      if (cancelled) return;
-      const ids = new Set<string>();
-      for (const g of gridIds) {
-        const cellId = cellByGrid.get(g);
-        if (cellId) ids.add(cellId);
-      }
-      setDone(ids.size === 0 ? NO_DONE : { heat: [...ids].map((id) => ({ gridCode: id, color: DONE_COLOR, value: null })), ids });
-    }, () => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [missionId, cellByGrid, refreshKey, doneCount]);
-
-  return done;
 }

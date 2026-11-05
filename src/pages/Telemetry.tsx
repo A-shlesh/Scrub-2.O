@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Beaker, Compass, Cpu, Droplet, Droplets, FlaskConical, MapPin, Thermometer, Waypoints, Wifi, Zap } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Beaker, Compass, Cpu, Crosshair, Droplet, Droplets, FlaskConical, Gauge, House, MapPin, Navigation, Ruler, Thermometer, Waypoints, Wifi, Zap } from 'lucide-react';
 import { ChartCard } from '../components/ChartCard';
 import { Navbar } from '../components/Navbar';
 import { PageHeader } from '../components/PageHeader';
@@ -35,7 +36,11 @@ const HISTORY_CHARTS: Array<{ key: SensorKey; title: string; unit: string }> = [
   { key: 'tds', title: 'TDS', unit: 'ppm' },
   { key: 'turbidity', title: 'Turbidity', unit: 'NTU' },
   { key: 'temperature_c', title: 'Temperature', unit: '°C' },
+  { key: 'humidity_percent', title: 'Humidity', unit: '%' },
 ];
+
+/** e.g. 100 -> "+100", -40 -> "-40", null -> "—" */
+const fmtMotor = (v: number | null | undefined) => (typeof v === 'number' ? `${v > 0 ? '+' : ''}${Math.round(v)}` : '—');
 
 /** Cloud sensor records for this robot over the last 30 minutes, refreshed every 10 s. */
 function useCloudHistory(enabled: boolean): { samples: SensorSample[]; error: string | null; loadedAt: number | null } {
@@ -98,6 +103,8 @@ export function TelemetryPage() {
   const speedLabel = typeof speed === 'number' && Number.isFinite(speed) ? `${speed.toFixed(1)} m/s` : '—';
   const aqi = telemetry?.air.aqi ?? null;
 
+  const ts = telemetry?.timestamp ?? null;
+
   const pill =
     connection.status === 'connected' && live
       ? { cls: 'live', label: 'Live' }
@@ -105,7 +112,6 @@ export function TelemetryPage() {
         ? { cls: 'stale', label: 'Stale' }
         : { cls: '', label: 'Offline' };
 
-  const ts = telemetry?.timestamp ?? null;
 
   // Alerts only make sense for fresh data: stale readings are not "current" problems.
   const alerts = connection.status === 'connected' && live ? alertsFor(telemetry) : [];
@@ -114,7 +120,19 @@ export function TelemetryPage() {
   const missionLabel = telemetry ? fmtMissionState(telemetry.missionState) : '-';
   const wp = typeof telemetry?.currentWaypoint === 'number' ? telemetry.currentWaypoint : null;
   const wpTotal = telemetry?.waypointTotal ?? null;
-  const progressLabel = wp !== null && wpTotal ? `${wp} / ${wpTotal} (${Math.min(100, Math.round((wp / wpTotal) * 100))}%)` : '—';
+  const nav = telemetry?.navigation;
+  const done = nav?.completedWaypoints ?? null;
+  const progressPct = nav?.progress !== null && nav?.progress !== undefined
+    ? Math.round(nav.progress * 100)
+    : wpTotal ? Math.min(100, Math.round(((done ?? wp ?? 0) / wpTotal) * 100)) : null;
+  const progressLabel = wpTotal ? `${done ?? '—'} of ${wpTotal} reached${progressPct !== null ? ` (${progressPct}%)` : ''}` : '—';
+  const targetLabel = nav?.target ? `${nav.target.lat.toFixed(6)}, ${nav.target.lon.toFixed(6)}` : '—';
+  const distLabel = typeof nav?.distanceToTargetM === 'number' ? `${nav.distanceToTargetM.toFixed(1)} m` : '—';
+  const motors = telemetry?.motors;
+  const motorLabel = motors && (motors.left !== null || motors.right !== null) ? `L ${fmtMotor(motors.left)} · R ${fmtMotor(motors.right)}` : '—';
+  const gcsReturn =
+    telemetry?.missionState === 'returning' ? 'Returning to GCS' : telemetry?.missionState === 'completed' ? 'Back at GCS' : telemetry?.missionId ? 'Not returning' : '—';
+  const readingAt = ts ? new Date(ts).toLocaleTimeString() : null;
 
   const history = useCloudHistory(supabaseConfigured && !DEMO);
   const series = useMemo(() => {
@@ -172,6 +190,12 @@ export function TelemetryPage() {
             <SensorCard icon={<Droplets size={16} />} tone="blue" label="Humidity" value={round(telemetry?.air.humidityPct)} unit="%" />
           </div>
         </div>
+        {readingAt && (
+          <p className="reading-meta">
+            Latest readings taken at {readingAt}
+            {lat !== null && lng !== null ? ` at ${lat.toFixed(6)}, ${lng.toFixed(6)}` : ' (no GPS fix)'}
+          </p>
+        )}
 
         <div className="strip">
           <div className="strip-item" title={locality ?? undefined}>
@@ -187,8 +211,8 @@ export function TelemetryPage() {
             <div className="v">{speedLabel}</div>
           </div>
           <div className="strip-item">
-            <div className="k"><Waypoints size={14} />Mission progress</div>
-            <div className="v">{progressLabel}</div>
+            <div className="k"><Navigation size={14} />Navigation</div>
+            <div className="v">{missionLabel}</div>
           </div>
           <div className="strip-item">
             <div className="k"><Wifi size={14} />Network</div>
@@ -199,11 +223,39 @@ export function TelemetryPage() {
           </div>
         </div>
 
+        <div className="section-label">Navigation{telemetry?.missionId ? ` · mission ${telemetry.missionId.slice(0, 8)}` : ''}</div>
+        <div className="strip nav-strip">
+          <div className="strip-item">
+            <div className="k"><Waypoints size={14} />Current waypoint</div>
+            <div className="v">{wp !== null ? `${wp}${wpTotal ? ` of ${wpTotal}` : ''}` : '—'}</div>
+          </div>
+          <div className="strip-item">
+            <div className="k"><Crosshair size={14} />Target</div>
+            <div className="v">{targetLabel}</div>
+          </div>
+          <div className="strip-item">
+            <div className="k"><Ruler size={14} />Distance to target</div>
+            <div className="v">{distLabel}</div>
+          </div>
+          <div className="strip-item">
+            <div className="k"><Gauge size={14} />Progress</div>
+            <div className="v">{progressLabel}</div>
+          </div>
+          <div className="strip-item">
+            <div className="k"><Zap size={14} />Motors</div>
+            <div className="v">{motorLabel}</div>
+          </div>
+          <div className="strip-item">
+            <div className="k"><House size={14} />GCS return</div>
+            <div className="v">{gcsReturn}</div>
+          </div>
+        </div>
+
         {supabaseConfigured && !DEMO && (
           <>
             <div className="section-label">
               Sensor history · last 30 min from the cloud · updates every 10 s
-              {history.loadedAt ? ` · ${history.samples.length} records` : ''}
+              {history.loadedAt ? ` · ${history.samples.length} records` : ''} · <Link to="/history">Full history</Link>
             </div>
             {history.error && (
               <div className="notice error" role="alert">

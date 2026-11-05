@@ -423,196 +423,6 @@ export function polygonAreaSqM(points: LatLon[]): number | null {
   return Math.abs(area / 2);
 }
 
-/**
- * Boustrophedon (serpentine) order over real grid cells:
- * north-south lanes traversed in alternating directions.
- */
-export function orderedCells(cells: GridCell[]): GridCell[] {
-  if (cells.length === 0) return [];
-  const cols = new Map<number, GridCell[]>();
-  for (const c of cells) {
-    const list = cols.get(c.col) ?? [];
-    list.push(c);
-    cols.set(c.col, list);
-  }
-  const ordered = [...cols.keys()].sort((a, b) => a - b);
-  const out: GridCell[] = [];
-  ordered.forEach((col, i) => {
-    const list = [...(cols.get(col) ?? [])].sort((a, b) => a.row - b.row);
-    if (i % 2 === 1) list.reverse();
-    out.push(...list);
-  });
-  return out;
-}
-
-/** Serpentine coverage path through real grid cell centres (straight legs, not yet checked against land). */
-export function coveragePath(cells: GridCell[]): LatLon[] {
-  return orderedCells(cells).map((c) => c.center);
-}
-
-/** True when the straight leg a->b crosses no shore or island edge (endpoints are assumed to be in water). */
-/** How many of `segs` the straight leg a-b crosses. */
-function crossingCount(a: number[], b: number[], segs: number[][]): number {
-  let n = 0;
-  for (const s of segs) if (!legClear(a, b, [s])) n++;
-  return n;
-}
-
-function legClear(a: number[], b: number[], segs: number[][]): boolean {
-  const minX = Math.min(a[0], b[0]);
-  const maxX = Math.max(a[0], b[0]);
-  const minY = Math.min(a[1], b[1]);
-  const maxY = Math.max(a[1], b[1]);
-  const orient = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) =>
-    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-  for (const s of segs) {
-    if (Math.max(s[0], s[2]) < minX || Math.min(s[0], s[2]) > maxX) continue;
-    if (Math.max(s[1], s[3]) < minY || Math.min(s[1], s[3]) > maxY) continue;
-    const d1 = orient(a[0], a[1], b[0], b[1], s[0], s[1]);
-    const d2 = orient(a[0], a[1], b[0], b[1], s[2], s[3]);
-    const d3 = orient(s[0], s[1], s[2], s[3], a[0], a[1]);
-    const d4 = orient(s[0], s[1], s[2], s[3], b[0], b[1]);
-    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return false;
-  }
-  return true;
-}
-
-export interface CoveragePlan {
-  /** waypoints in visiting order, including any detour waypoints */
-  path: LatLon[];
-  /** 'lane' = planned sampling cell, 'detour' = extra cell inserted to stay in water; parallel to `path` */
-  kinds: Array<'lane' | 'detour'>;
-  /** each rerouted stretch, from the last good waypoint to the next (for drawing) */
-  detours: LatLon[][];
-  /** straight legs that would cross land and could not be routed around */
-  blocked: Array<[LatLon, LatLon]>;
-}
-
-/** Leg checks and shortest in-water chains of neighbouring cells, over `order`. */
-function cellRouter(order: GridCell[], boundary: LatLon[], holes: LatLon[][]) {
-  const refLat = boundary.reduce((s, p) => s + p.lat, 0) / boundary.length;
-  const lonScale = mPerDegLon(refLat);
-  const segs = [boundary, ...holes.filter((h) => h.length >= 3)].flatMap((r) => ringSegmentsM(r, lonScale));
-  const xy = (p: LatLon) => [p.lon * lonScale, p.lat * M_PER_DEG_LAT];
-
-  const index = new Map<string, number>();
-  order.forEach((c, i) => index.set(`${c.row},${c.col}`, i));
-  const adjMemo = new Map<number, boolean>();
-  const adjacentClear = (i: number, j: number): boolean => {
-    const key = i < j ? i * 100_000 + j : j * 100_000 + i;
-    let v = adjMemo.get(key);
-    if (v === undefined) {
-      v = legClear(xy(order[i].center), xy(order[j].center), segs);
-      adjMemo.set(key, v);
-    }
-    return v;
-  };
-
-  // Shortest chain of 8-connected cells whose consecutive legs are all in water.
-  const route = (from: number, to: number): number[] | null => {
-    const dist = new Map<number, number>([[from, 0]]);
-    const prev = new Map<number, number>();
-    const heap: Array<[number, number]> = [[0, from]];
-    const push = (item: [number, number]) => {
-      heap.push(item);
-      let k = heap.length - 1;
-      while (k > 0) {
-        const p = (k - 1) >> 1;
-        if (heap[p][0] <= heap[k][0]) break;
-        [heap[p], heap[k]] = [heap[k], heap[p]];
-        k = p;
-      }
-    };
-    const pop = (): [number, number] => {
-      const top = heap[0];
-      const last = heap.pop() as [number, number];
-      if (heap.length > 0) {
-        heap[0] = last;
-        let k = 0;
-        for (;;) {
-          const l = 2 * k + 1;
-          const r = l + 1;
-          let m = k;
-          if (l < heap.length && heap[l][0] < heap[m][0]) m = l;
-          if (r < heap.length && heap[r][0] < heap[m][0]) m = r;
-          if (m === k) break;
-          [heap[m], heap[k]] = [heap[k], heap[m]];
-          k = m;
-        }
-      }
-      return top;
-    };
-    while (heap.length > 0) {
-      const [d, u] = pop();
-      if (u === to) break;
-      if (d > (dist.get(u) ?? Infinity)) continue;
-      const cu = order[u];
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          if (dr === 0 && dc === 0) continue;
-          const v = index.get(`${cu.row + dr},${cu.col + dc}`);
-          if (v === undefined || !adjacentClear(u, v)) continue;
-          const pv = xy(order[v].center);
-          const pu = xy(cu.center);
-          const nd = d + Math.hypot(pv[0] - pu[0], pv[1] - pu[1]);
-          if (nd < (dist.get(v) ?? Infinity)) {
-            dist.set(v, nd);
-            prev.set(v, u);
-            push([nd, v]);
-          }
-        }
-      }
-    }
-    if (!prev.has(to)) return null;
-    const chain = [to];
-    while (chain[chain.length - 1] !== from) chain.push(prev.get(chain[chain.length - 1]) as number);
-    return chain.reverse();
-  };
-  return { segs, xy, route };
-}
-
-/**
- * Coverage path that stays in the water. Every leg of the serpentine is checked
- * against the shore and islands; a leg that would cross land is replaced by the
- * shortest chain of neighbouring grid cells (Dijkstra). Legs that cannot be
- * routed are reported in `blocked` instead of silently left crossing land.
- */
-export function planCoverage(cells: GridCell[], boundary: LatLon[] | null, holes: LatLon[][] = []): CoveragePlan {
-  const order = orderedCells(cells);
-  const plain: CoveragePlan = { path: order.map((c) => c.center), kinds: order.map(() => 'lane'), detours: [], blocked: [] };
-  if (order.length < 2 || !boundary || boundary.length < 3) return plain;
-  const { segs, xy, route } = cellRouter(order, boundary, holes);
-
-  const path: LatLon[] = [order[0].center];
-  const kinds: Array<'lane' | 'detour'> = ['lane'];
-  const detours: LatLon[][] = [];
-  const blocked: Array<[LatLon, LatLon]> = [];
-  for (let i = 0; i < order.length - 1; i++) {
-    const a = order[i];
-    const b = order[i + 1];
-    if (legClear(xy(a.center), xy(b.center), segs)) {
-      path.push(b.center);
-      kinds.push('lane');
-      continue;
-    }
-    const chain = route(i, i + 1);
-    if (!chain) {
-      blocked.push([a.center, b.center]);
-      path.push(b.center);
-      kinds.push('lane');
-      continue;
-    }
-    for (const k of chain.slice(1, -1)) {
-      path.push(order[k].center);
-      kinds.push('detour');
-    }
-    path.push(b.center);
-    kinds.push('lane');
-    detours.push(chain.map((k) => order[k].center));
-  }
-  return { path, kinds, detours, blocked };
-}
-
 /** Great-circle-free planar length of a path in metres (fine at lake scale). */
 export function pathLengthM(path: LatLon[]): number {
   let total = 0;
@@ -679,18 +489,29 @@ export function shoreCrossings(a: LatLon, b: LatLon, boundary: LatLon[], holes: 
   };
 }
 
-/**
- * In-water route between two grid-cell centres: the cell centres to pass through in
- * between ([] when the straight leg is already in water), or null when there is none.
- */
-export function waterRoute(cells: GridCell[], boundary: LatLon[] | null, holes: LatLon[][], from: LatLon, to: LatLon): LatLon[] | null {
-  if (!boundary || boundary.length < 3) return [];
-  const key = (p: LatLon) => `${p.lat.toFixed(9)},${p.lon.toFixed(9)}`;
-  const { segs, xy, route } = cellRouter(cells, boundary, holes);
-  if (legClear(xy(from), xy(to), segs)) return [];
-  const i = cells.findIndex((c) => key(c.center) === key(from));
-  const j = cells.findIndex((c) => key(c.center) === key(to));
-  if (i < 0 || j < 0) return null;
-  const chain = route(i, j);
-  return chain ? chain.slice(1, -1).map((k) => cells[k].center) : null;
+/** How many of `segs` the straight leg a-b crosses. */
+function crossingCount(a: number[], b: number[], segs: number[][]): number {
+  let n = 0;
+  for (const s of segs) if (!legClear(a, b, [s])) n++;
+  return n;
+}
+
+/** True when the straight leg a-b properly crosses none of `segs`. */
+function legClear(a: number[], b: number[], segs: number[][]): boolean {
+  const minX = Math.min(a[0], b[0]);
+  const maxX = Math.max(a[0], b[0]);
+  const minY = Math.min(a[1], b[1]);
+  const maxY = Math.max(a[1], b[1]);
+  const orient = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) =>
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  for (const s of segs) {
+    if (Math.max(s[0], s[2]) < minX || Math.min(s[0], s[2]) > maxX) continue;
+    if (Math.max(s[1], s[3]) < minY || Math.min(s[1], s[3]) > maxY) continue;
+    const d1 = orient(a[0], a[1], b[0], b[1], s[0], s[1]);
+    const d2 = orient(a[0], a[1], b[0], b[1], s[2], s[3]);
+    const d3 = orient(s[0], s[1], s[2], s[3], a[0], a[1]);
+    const d4 = orient(s[0], s[1], s[2], s[3], b[0], b[1]);
+    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return false;
+  }
+  return true;
 }

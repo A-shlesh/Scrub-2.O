@@ -31,7 +31,7 @@ const fake = vi.hoisted(() => {
 
 vi.mock('./supabaseClient', () => ({ supabase: fake.client, supabaseConfigured: true }));
 
-import { ACK_TIMEOUT_MS, command, describeAnswer, sendCommand, waitForAck } from './robotService';
+import { ACK_TIMEOUT_MS, command, sendCommand, waitForAck } from './robotService';
 
 /** What the Pi does: answer a pending command. */
 function robotAnswers(commandId: string, status: 'ACKED' | 'REJECTED', extra: Record<string, unknown> = {}) {
@@ -66,7 +66,7 @@ describe('robot commands', () => {
     await vi.advanceTimersByTimeAsync(2000);
     const row = await answer;
     expect(row.status).toBe('REJECTED');
-    expect(describeAnswer('START', row)).toBe('Robot refused start: no waypoints loaded');
+    expect(row.detail).toBe('no waypoints loaded');
   });
 
   it('expires an unanswered command so the robot can never act on it late', async () => {

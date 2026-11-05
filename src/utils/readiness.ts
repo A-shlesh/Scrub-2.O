@@ -1,5 +1,5 @@
 import type { Telemetry } from '../types';
-import { BATTERY_MINUTES, BATTERY_RESERVE_PCT, MIN_START_BATTERY_PCT, ROBOT_SPEED_MPS, SAMPLE_SECONDS } from '../config/robot';
+import { BATTERY_MINUTES, BATTERY_RESERVE_PCT, MIN_START_BATTERY_PCT, ROBOT_SPEED_MPS } from '../config/robot';
 
 export interface MissionEstimate {
   distanceM: number;
@@ -8,9 +8,9 @@ export interface MissionEstimate {
   batteryNeededPct: number;
 }
 
-/** Rough time and battery for a route of `distanceM` metres with `sampleStops` sampling cells. */
-export function estimateMission(distanceM: number, sampleStops: number): MissionEstimate {
-  const minutes = (distanceM / ROBOT_SPEED_MPS + sampleStops * SAMPLE_SECONDS) / 60;
+/** Rough time and battery for a route of `distanceM` metres (the robot samples while moving, no stops). */
+export function estimateMission(distanceM: number): MissionEstimate {
+  const minutes = distanceM / ROBOT_SPEED_MPS / 60;
   return {
     distanceM,
     minutes,

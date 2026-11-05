@@ -18,6 +18,7 @@ const DELETED_IDS_KEY = 'scrub:deletedIds';
 const SUPABASE_LAKE_IDS_KEY = 'scrub:supabaseLakeIds';
 const MISSION_IDS_KEY = 'scrub:missionIds';
 const GCS_KEY = 'scrub:gcs';
+const SWEEP_KEY = 'scrub:sweepSpacing';
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -78,6 +79,18 @@ export function saveGcs(lakeId: string, gcs: LatLon | null): void {
   if (gcs) all[lakeId] = { lat: gcs.lat, lon: gcs.lon };
   else delete all[lakeId];
   writeJson(GCS_KEY, all);
+}
+
+/** Sweep spacing (m) chosen for a lake on the Mission page, or null for the default. */
+export function loadSweepSpacing(lakeId: string): number | null {
+  const v = readJson<Record<string, number>>(SWEEP_KEY, {})[lakeId];
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
+}
+
+export function saveSweepSpacing(lakeId: string, metres: number): void {
+  const all = readJson<Record<string, number>>(SWEEP_KEY, {});
+  all[lakeId] = metres;
+  writeJson(SWEEP_KEY, all);
 }
 
 export function loadMissionId(lakeId: string): string | null {

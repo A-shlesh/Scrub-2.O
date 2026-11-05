@@ -33,6 +33,7 @@ export function Navbar() {
           <NavLink to="/" end>Home</NavLink>
           <NavLink to="/observatory">Observatory</NavLink>
           <NavLink to="/mission">Mission</NavLink>
+          <NavLink to="/history">History</NavLink>
           <NavLink to="/analytics">Analytics</NavLink>
         </nav>
         <div className="nav-right">
