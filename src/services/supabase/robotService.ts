@@ -55,7 +55,12 @@ export async function sendCommand(command: RobotCommand, missionId: string | nul
     payload,
     status: 'PENDING',
   });
-  if (error) throw new Error(`Could not send ${command} to the robot: ${error.message}`);
+  if (error) {
+    if (/robot_commands/.test(error.message)) {
+      throw new Error(`Could not send ${command}: this Supabase project has no robot_commands table. Set VITE_API_BASE_URL so commands go to the Pi backend.`);
+    }
+    throw new Error(`Could not send ${command} to the robot: ${error.message}`);
+  }
   return commandId;
 }
 

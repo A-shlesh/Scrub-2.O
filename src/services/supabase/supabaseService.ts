@@ -24,16 +24,6 @@ export function utcIso(ms: number = Date.now()): string {
   return new Date(ms).toISOString();
 }
 
-function polygonEwkt(points: LatLon[]): string {
-  const ring = openRing(points);
-  const closed = [...ring, ring[0]];
-  return `SRID=4326;POLYGON((${closed.map((p) => `${p.lon} ${p.lat}`).join(', ')}))`;
-}
-
-function pointEwkt(p: LatLon): string {
-  return `SRID=4326;POINT(${p.lon} ${p.lat})`;
-}
-
 function client() {
   if (!supabaseConfigured || !supabase) throw new Error(NOT_CONFIGURED);
   return supabase;
@@ -59,54 +49,68 @@ async function selectAll<T>(page: (from: number, to: number) => PageResult<T>): 
   }
 }
 
-/**
- * Identity of a grid cell on the water: its size and its centre (to ~0.1 m).
- * Grid codes (KNG001, ...) are renumbered whenever the size, shore margin or boundary
- * changes, so they cannot identify a cell. Matching on geometry means a row — and the
- * sensor samples recorded against it — always refers to the same patch of water.
- */
-export function gridGeometryKey(sizeM: number, lat: number, lon: number): string {
-  return `${Number(sizeM)}|${Number(lat).toFixed(6)}|${Number(lon).toFixed(6)}`;
+// ── Tables (Supabase project used by the dashboard) ────────────────────────
+//   lakes(lake_id, name, created_at)
+//   missions(mission_id, device_id, lake_id, status, started_at, completed_at, created_at, notes,
+//            total_waypoints, current_waypoint_index)
+//   mission_waypoints(waypoint_id, mission_id, sequence_order, latitude, longitude, status, created_at)
+//   sensor_readings(reading_id, mission_id, device_id, recorded_at, created_at, latitude, longitude,
+//                   heading, ph, tds, turbidity, temperature_c, humidity_percent)
+
+const READING_COLUMNS =
+  'reading_id, mission_id, device_id, recorded_at, created_at, latitude, longitude, heading, ph, tds, turbidity, temperature_c, humidity_percent';
+
+interface ReadingRow {
+  reading_id: string;
+  mission_id: string | null;
+  device_id: string | null;
+  recorded_at: string;
+  created_at: string | null;
+  latitude: number;
+  longitude: number;
+  heading: number | null;
+  ph: number | null;
+  tds: number | null;
+  turbidity: number | null;
+  temperature_c: number | null;
+  humidity_percent: number | null;
 }
 
-export interface SupabaseGrid {
-  gridId: string;
-  gridCode: string;
-  gridSizeM: number;
-  centerLat: number;
-  centerLon: number;
-}
+const numOrNull = (v: unknown): number | null => (v === null || v === undefined || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
 
-async function fetchGridsBySupabaseLakeId(supaLakeId: string): Promise<SupabaseGrid[]> {
-  const sb = client();
-  const rows = await selectAll<{ grid_id: string; grid_code: string; grid_size_m: number; center_lat: number; center_lon: number }>(
-    (from, to) =>
-      sb
-        .from('grids')
-        .select('grid_id, grid_code, grid_size_m, center_lat, center_lon')
-        .eq('lake_id', supaLakeId)
-        .order('grid_id')
-        .range(from, to),
-  );
-  return rows.map((r) => ({
-    gridId: r.grid_id,
-    gridCode: r.grid_code,
-    gridSizeM: Number(r.grid_size_m),
-    centerLat: Number(r.center_lat),
-    centerLon: Number(r.center_lon),
-  }));
+/** One `sensor_readings` row in the shape the pages use. */
+export function readingToSample(r: ReadingRow): SensorSample {
+  return {
+    sample_id: r.reading_id,
+    session_id: null,
+    grid_id: null,
+    device_id: r.device_id,
+    mission_id: r.mission_id,
+    heading_deg: numOrNull(r.heading),
+    sample_number: 0,
+    recorded_at: r.recorded_at,
+    latitude: Number(r.latitude),
+    longitude: Number(r.longitude),
+    ph: numOrNull(r.ph),
+    tds: numOrNull(r.tds),
+    turbidity: numOrNull(r.turbidity),
+    temperature_c: numOrNull(r.temperature_c),
+    humidity_percent: numOrNull(r.humidity_percent),
+    created_at: r.created_at ?? r.recorded_at,
+  };
 }
 
 /**
  * Make sure the lake (or, for a sample polygon, its parent lake) has a `lakes` row and
- * return its Supabase lake_id. A sample polygon never overwrites its parent's name or outline.
+ * return its Supabase lake_id. A sample polygon never overwrites its parent's name.
  */
 export async function pushLake(lake: Lake): Promise<string> {
   const sb = client();
   const boundary = lake.scrubBoundary?.points ?? lake.osmBoundary?.points ?? null;
   if (!boundary || boundary.length < 3) throw new Error('This lake has no boundary to send.');
   const lakeId = getOrCreateSupabaseLakeId(supabaseLakeKey(lake));
-  const row = { lake_id: lakeId, name: lake.name ?? 'Unnamed', boundary: polygonEwkt(boundary), created_at: utcIso() };
+  // The outline itself travels with each mission (payload polygon); the row only names the lake.
+  const row = { lake_id: lakeId, name: lake.name ?? 'Unnamed', created_at: utcIso() };
   const { error } = lake.parentLakeId
     ? await sb.from('lakes').upsert(row, { onConflict: 'lake_id', ignoreDuplicates: true })
     : await sb.from('lakes').upsert(row);
@@ -115,10 +119,10 @@ export async function pushLake(lake: Lake): Promise<string> {
 }
 
 /**
- * Create the mission row (status PENDING) before the plan is sent to the robot, and keep
- * the plan with it (polygon, GCS, waypoint count, full payload) for the mission history.
- * The plan columns come from the polygon-navigation migration; without them only the
- * basic row is stored. `localLakeId` is the SCRUB lake the mission is remembered under.
+ * Record the mission before the plan is sent to the robot: a `missions` row (status PENDING,
+ * total_waypoints) and one `mission_waypoints` row per waypoint in visiting order
+ * (sequence_order 0 = GCS). If the waypoints cannot be stored, the mission is removed again.
+ * `localLakeId` is the SCRUB lake the mission is remembered under.
  */
 export async function createMission(localLakeId: string, supabaseLakeId: string, payload: MissionPayload): Promise<void> {
   const sb = client();
@@ -129,22 +133,29 @@ export async function createMission(localLakeId: string, supabaseLakeId: string,
     status: 'PENDING',
     created_at: payload.created_at,
     notes: null,
+    total_waypoints: payload.waypoint_count,
   });
   if (error) throw new Error(`Could not create mission: ${error.message}`);
+
+  const rows = payload.waypoints.map((w) => ({
+    waypoint_id: crypto.randomUUID(),
+    mission_id: payload.mission_id,
+    sequence_order: w.sequence_order,
+    latitude: w.latitude,
+    longitude: w.longitude,
+    status: 'PENDING',
+    created_at: payload.created_at,
+  }));
+  for (const [i, batch] of chunks(rows, WRITE_CHUNK).entries()) {
+    const { error: wErr } = await sb.from('mission_waypoints').insert(batch);
+    if (wErr) {
+      // Best-effort rollback so a half-stored mission is never left PENDING.
+      await sb.from('mission_waypoints').delete().eq('mission_id', payload.mission_id);
+      await sb.from('missions').delete().eq('mission_id', payload.mission_id);
+      throw new Error(`Could not store the mission waypoints (batch ${i + 1}): ${wErr.message}`);
+    }
+  }
   rememberMissionId(localLakeId, payload.mission_id);
-  // Best effort: older schemas lack these columns.
-  await sb
-    .from('missions')
-    .update({
-      gcs_lat: payload.ground_control.latitude,
-      gcs_lon: payload.ground_control.longitude,
-      polygon: polygonEwkt(payload.polygon.map((p) => ({ lat: p.latitude, lon: p.longitude }))),
-      sweep_spacing_m: payload.sweep_spacing_m,
-      waypoint_count: payload.waypoint_count,
-      waypoint_checksum: payload.checksum,
-      plan: payload,
-    })
-    .eq('mission_id', payload.mission_id);
 }
 
 /** Mark a mission ABORTED (e.g. the robot never loaded its waypoints). Best effort: errors are ignored. */
@@ -157,35 +168,40 @@ export interface LatestMission {
   missionId: string | null;
   /** missions.status as kept by the robot: PENDING, ACTIVE, PAUSED, COMPLETED, ABORTED */
   status: string | null;
+  /** missions.current_waypoint_index / total_waypoints, as kept by the robot */
+  currentWaypoint: number | null;
+  totalWaypoints: number | null;
 }
+
+type MissionRow = { mission_id: string; status: string; current_waypoint_index: number | null; total_waypoints: number | null };
+const toLatest = (m: MissionRow): LatestMission => ({
+  missionId: m.mission_id,
+  status: m.status,
+  currentWaypoint: numOrNull(m.current_waypoint_index),
+  totalWaypoints: numOrNull(m.total_waypoints),
+});
 
 /**
  * The mission created for this lake from this browser or, for a real lake with none
  * remembered, the lake's latest mission. A sample polygon only ever shows its own mission.
  */
 export async function fetchLatestMission(lake: Lake): Promise<LatestMission> {
-  const EMPTY: LatestMission = { missionId: null, status: null };
+  const EMPTY: LatestMission = { missionId: null, status: null, currentWaypoint: null, totalWaypoints: null };
   if (!supabaseConfigured || !supabase) return EMPTY;
   const sb = supabase;
+  const cols = 'mission_id, status, current_waypoint_index, total_waypoints';
   const remembered = loadMissionId(lake.id);
   if (remembered) {
-    const { data, error } = await sb.from('missions').select('status').eq('mission_id', remembered).maybeSingle();
+    const { data, error } = await sb.from('missions').select(cols).eq('mission_id', remembered).maybeSingle();
     if (error) throw new Error(error.message);
-    return data ? { missionId: remembered, status: (data as { status: string }).status } : EMPTY;
+    return data ? toLatest(data as MissionRow) : EMPTY;
   }
   if (lake.parentLakeId) return EMPTY;
   const supaLakeId = getSupabaseLakeId(lake.id);
   if (!supaLakeId) return EMPTY;
-  const { data, error } = await sb
-    .from('missions')
-    .select('mission_id, status')
-    .eq('lake_id', supaLakeId)
-    .order('created_at', { ascending: false })
-    .limit(1);
+  const { data, error } = await sb.from('missions').select(cols).eq('lake_id', supaLakeId).order('created_at', { ascending: false }).limit(1);
   if (error) throw new Error(error.message);
-  if (!data || data.length === 0) return EMPTY;
-  const m = data[0] as { mission_id: string; status: string };
-  return { missionId: m.mission_id, status: m.status };
+  return data && data.length > 0 ? toLatest(data[0] as MissionRow) : EMPTY;
 }
 
 export interface MissionListItem {
@@ -235,7 +251,7 @@ export async function fetchMissions(deviceId: string, limit = 100): Promise<Miss
 export const HISTORY_MAX_ROWS = 5000;
 
 /**
- * GPS-tagged sensor records (one every 10 s) for a robot, optionally for one mission,
+ * GPS-tagged sensor readings (`sensor_readings`, one every 10 s) for a robot, optionally for one mission,
  * within [fromMs, toMs], oldest first. `truncated` is true when more rows exist.
  */
 export async function fetchSensorHistory(q: {
@@ -248,18 +264,18 @@ export async function fetchSensorHistory(q: {
   const out: SensorSample[] = [];
   for (let from = 0; from < HISTORY_MAX_ROWS; from += PAGE) {
     let query = sb
-      .from('sensor_samples')
-      .select('*')
+      .from('sensor_readings')
+      .select(READING_COLUMNS)
       .eq('device_id', q.deviceId)
       .gte('recorded_at', utcIso(q.fromMs))
       .lte('recorded_at', utcIso(q.toMs));
     if (q.missionId) query = query.eq('mission_id', q.missionId);
     const { data, error } = await query
       .order('recorded_at', { ascending: true })
-      .order('sample_id')
+      .order('reading_id')
       .range(from, Math.min(from + PAGE, HISTORY_MAX_ROWS) - 1);
     if (error) throw new Error(error.message);
-    const rows = (data ?? []) as SensorSample[];
+    const rows = ((data ?? []) as unknown as ReadingRow[]).map(readingToSample);
     out.push(...rows);
     if (rows.length < PAGE) return { samples: out, truncated: false };
   }
@@ -296,85 +312,47 @@ export const SENSORS: SensorMeta[] = [
 
 // ── Read functions ─────────────────────────────────────────────────────────
 
-/** Every grid row stored for this lake (for a sample polygon: its parent lake), across all grid layouts. */
-export async function fetchLakeGrids(lake: Lake): Promise<SupabaseGrid[]> {
-  if (!supabaseConfigured || !supabase) return [];
-  const supaLakeId = getSupabaseLakeId(supabaseLakeKey(lake));
-  if (!supaLakeId) return [];
-  return fetchGridsBySupabaseLakeId(supaLakeId);
-}
-
-/**
- * Map Supabase grid rows onto the grid currently shown (same size and centre).
- * Returns grid_id → local cell id; rows from other layouts or sibling polygons are left out.
- */
-export function matchGridsToCells(grids: SupabaseGrid[], cells: GridCell[], cellSizeM: number): Map<string, string> {
-  const cellByGeometry = new Map(cells.map((c) => [gridGeometryKey(cellSizeM, c.center.lat, c.center.lon), c.id]));
-  const out = new Map<string, string>();
-  for (const g of grids) {
-    const cellId = cellByGeometry.get(gridGeometryKey(g.gridSizeM, g.centerLat, g.centerLon));
-    if (cellId) out.set(g.gridId, cellId);
-  }
-  return out;
-}
-
-/** All sensor samples recorded against these grid ids, oldest first; `sinceMs` keeps only newer ones. */
-export async function fetchSensorSamples(gridIds: string[], sinceMs: number | null = null): Promise<SensorSample[]> {
-  if (!supabaseConfigured || !supabase || gridIds.length === 0) return [];
-  const sb = supabase;
-  const out: SensorSample[] = [];
-  for (const ids of chunks(gridIds, IN_CHUNK)) {
-    const rows = await selectAll<SensorSample>((from, to) => {
-      let q = sb.from('sensor_samples').select('*').in('grid_id', ids);
-      if (sinceMs !== null) q = q.gte('recorded_at', utcIso(sinceMs));
-      return q.order('recorded_at', { ascending: true }).order('sample_id').range(from, to);
-    });
-    out.push(...rows);
-  }
-  if (gridIds.length > IN_CHUNK) out.sort((a, b) => Date.parse(a.recorded_at) - Date.parse(b.recorded_at));
-  return out;
-}
-
-/**
- * Cloud sensor records uploaded by one robot since `sinceMs`, oldest first
- * (the Pi uploads one every 10 s; needs the `device_id` column from the mission-control migration).
- */
+/** Cloud sensor readings for one robot since `sinceMs`, oldest first (the Pi uploads one every 10 s). */
 export async function fetchDeviceSamples(deviceId: string, sinceMs: number): Promise<SensorSample[]> {
   if (!supabaseConfigured || !supabase) return [];
   const sb = supabase;
-  return selectAll<SensorSample>((from, to) =>
+  const rows = await selectAll<ReadingRow>((from, to) =>
     sb
-      .from('sensor_samples')
-      .select('*')
+      .from('sensor_readings')
+      .select(READING_COLUMNS)
       .eq('device_id', deviceId)
       .gte('recorded_at', utcIso(sinceMs))
       .order('recorded_at', { ascending: true })
-      .order('sample_id')
-      .range(from, to),
+      .order('reading_id')
+      .range(from, to) as unknown as PageResult<ReadingRow>,
   );
+  return rows.map(readingToSample);
 }
 
 /**
- * Of these grid ids, the ones with a completed session (completed_at not null)
- * or a COMPLETED mission_grids row. Used to mark visited cells on the heatmap.
+ * Every sensor reading taken during this lake's missions (for a sample polygon: its parent
+ * lake's), since `sinceMs` when given, oldest first. Grids play no part: the Analytics page
+ * places each reading in a cell by its GPS position.
  */
-export async function fetchVisitedGridIds(gridIds: string[]): Promise<Set<string>> {
-  const visited = new Set<string>();
-  if (!supabaseConfigured || !supabase || gridIds.length === 0) return visited;
+export async function fetchLakeReadings(lake: Lake, sinceMs: number | null = null): Promise<SensorSample[]> {
+  if (!supabaseConfigured || !supabase) return [];
   const sb = supabase;
-  for (const ids of chunks(gridIds, IN_CHUNK)) {
-    const [sessions, missionGrids] = await Promise.all([
-      selectAll<{ grid_id: string }>((from, to) =>
-        sb.from('grid_sessions').select('grid_id').in('grid_id', ids).not('completed_at', 'is', null).order('grid_id').range(from, to),
-      ),
-      selectAll<{ grid_id: string }>((from, to) =>
-        sb.from('mission_grids').select('grid_id').in('grid_id', ids).eq('status', 'COMPLETED').order('grid_id').range(from, to),
-      ),
-    ]);
-    for (const r of sessions) visited.add(r.grid_id);
-    for (const r of missionGrids) visited.add(r.grid_id);
+  const supaLakeId = getSupabaseLakeId(supabaseLakeKey(lake));
+  if (!supaLakeId) return [];
+  const missions = await selectAll<{ mission_id: string }>((from, to) =>
+    sb.from('missions').select('mission_id').eq('lake_id', supaLakeId).order('mission_id').range(from, to),
+  );
+  const out: SensorSample[] = [];
+  for (const ids of chunks(missions.map((m) => m.mission_id), IN_CHUNK)) {
+    const rows = await selectAll<ReadingRow>((from, to) => {
+      let q = sb.from('sensor_readings').select(READING_COLUMNS).in('mission_id', ids);
+      if (sinceMs !== null) q = q.gte('recorded_at', utcIso(sinceMs));
+      return q.order('recorded_at', { ascending: true }).order('reading_id').range(from, to) as unknown as PageResult<ReadingRow>;
+    });
+    out.push(...rows.map(readingToSample));
   }
-  return visited;
+  out.sort((x, y) => Date.parse(x.recorded_at) - Date.parse(y.recorded_at));
+  return out;
 }
 
 function stats(vals: number[]): { avg: number | null; min: number | null; max: number | null } {
@@ -421,35 +399,5 @@ export function computeGridAnalytics(
     return { sensor: meta, ...stats(vals), count: vals.length };
   });
 
-  return { lakeId, cellAverages, sensorSummaries, totalSamples: samples.length, totalSessions: new Set(samples.map((s) => s.session_id)).size };
-}
-
-// ── Ground control station ─────────────────────────────────────────────
-
-/**
- * The lake's GCS stored in Supabase (`lakes.gcs_lat` / `gcs_lon`). Returns undefined when
- * it cannot be read (not configured, lake not uploaded yet, columns not added yet),
- * null when the lake has no GCS.
- */
-export async function fetchGcs(lake: Lake): Promise<LatLon | null | undefined> {
-  if (!supabaseConfigured || !supabase) return undefined;
-  const lakeId = getSupabaseLakeId(supabaseLakeKey(lake));
-  if (!lakeId) return undefined;
-  const { data, error } = await supabase.from('lakes').select('gcs_lat, gcs_lon').eq('lake_id', lakeId).maybeSingle();
-  if (error || !data) return undefined;
-  const row = data as { gcs_lat: number | null; gcs_lon: number | null };
-  return typeof row.gcs_lat === 'number' && typeof row.gcs_lon === 'number' ? { lat: row.gcs_lat, lon: row.gcs_lon } : null;
-}
-
-/** Store the lake's GCS in Supabase. Returns false when it could not be stored. */
-export async function saveGcsRemote(lake: Lake, gcs: LatLon | null): Promise<boolean> {
-  if (!supabaseConfigured || !supabase) return false;
-  const lakeId = getSupabaseLakeId(supabaseLakeKey(lake));
-  if (!lakeId) return false;
-  const { data, error } = await supabase
-    .from('lakes')
-    .update({ gcs_lat: gcs?.lat ?? null, gcs_lon: gcs?.lon ?? null })
-    .eq('lake_id', lakeId)
-    .select('lake_id');
-  return !error && Array.isArray(data) && data.length > 0;
+  return { lakeId, cellAverages, sensorSummaries, totalSamples: samples.length, totalSessions: new Set(samples.map((s) => s.mission_id ?? s.session_id).filter((id) => id)).size };
 }

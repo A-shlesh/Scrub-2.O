@@ -34,7 +34,7 @@ import { ackMismatch, buildMissionPayload, canonicalWaypointText, toMissionWaypo
 import { loadGcs, loadSweepSpacing, rememberMissionId, saveGcs, saveSweepSpacing, supabaseLakeKey } from '../services/storage/lakeStorage';
 import type { LatLon, MissionState } from '../types';
 import { fmtMissionState } from '../utils/format';
-import { abandonMission, createMission, fetchGcs, fetchLatestMission, pushLake, saveGcsRemote } from '../services/supabase/supabaseService';
+import { abandonMission, createMission, fetchLatestMission, pushLake } from '../services/supabase/supabaseService';
 import type { LatestMission } from '../services/supabase/supabaseService';
 import { ROBOT_ID } from '../services/supabase/robotService';
 import { describeAnswer, robotLink } from '../services/robot/robotLink';
@@ -43,7 +43,7 @@ import type { PiMissionStatus } from '../services/robot/piApi';
 import { normaliseMissionState } from '../services/realtime/telemetryParser';
 import { supabaseConfigured } from '../services/supabase/supabaseClient';
 
-const NO_MISSION: LatestMission = { missionId: null, status: null };
+const NO_MISSION: LatestMission = { missionId: null, status: null, currentWaypoint: null, totalWaypoints: null };
 
 /** A plan the robot confirmed it validated and stored, with the exact waypoints it confirmed. */
 interface LoadedPlan {
@@ -77,8 +77,8 @@ export function MissionPage() {
   const [spacingM, setSpacingM] = useState(SWEEP_SPACING_M);
   const [spacingText, setSpacingText] = useState(String(SWEEP_SPACING_M));
 
-  // One GCS and one sweep spacing per real lake (sample polygons use their lake's).
-  // Supabase holds the shared GCS so every device sees the same point; this browser keeps a copy.
+  // One GCS and one sweep spacing per real lake (sample polygons use their lake's), kept in
+  // this browser. The GCS also travels with every mission (payload ground_control).
   useEffect(() => {
     setPlacingGcs(false);
     if (!lake) {
@@ -90,28 +90,15 @@ export function MissionPage() {
     setSpacingM(sp);
     setSpacingText(String(sp));
     setGcs(loadGcs(key) ?? loadGcs(lake.id));
-    if (!useCloud) return;
-    let cancelled = false;
-    fetchGcs(lake).then((remote) => {
-      if (cancelled || remote === undefined) return;
-      saveGcs(key, remote);
-      setGcs(remote);
-    }, () => undefined);
-    return () => {
-      cancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lake?.id, lake?.parentLakeId]);
 
-  const changeGcs = async (p: LatLon | null) => {
+  const changeGcs = (p: LatLon | null) => {
     if (!lake) return;
     saveGcs(supabaseLakeKey(lake), p);
     if (lake.parentLakeId) saveGcs(lake.id, null);
     setGcs(p);
     setPlacingGcs(false);
-    if (useCloud && !(await saveGcsRemote(lake, p))) {
-      setNotice({ tone: 'info', text: 'GCS saved in this browser. It is shared with other devices once a plan has been sent to the robot.' });
-    }
   };
 
   const commitSpacing = (text: string) => {
@@ -252,7 +239,6 @@ export function MissionPage() {
       if (useCloud) {
         setBusy('Saving the mission to Supabase…');
         supaLakeId = await pushLake(lake);
-        void saveGcsRemote(lake, gcs); // the lake row exists now, so the GCS can be shared
       }
       const payload = await buildMissionPayload({
         missionId,
@@ -358,9 +344,10 @@ export function MissionPage() {
   /** The GCS and the sweep spacing cannot change while the robot is running a mission. */
   const locked = (started && !finished) || busy !== null;
 
-  const wpNow = liveForMission?.currentWaypoint ?? piStatus?.currentWaypoint ?? null;
+  const cloudWp = latest.missionId === missionId ? latest : null;
+  const wpNow = liveForMission?.currentWaypoint ?? piStatus?.currentWaypoint ?? cloudWp?.currentWaypoint ?? null;
   const wpIndex = typeof wpNow === 'number' ? wpNow : null;
-  const wpTotal = liveForMission?.waypointTotal ?? piStatus?.totalWaypoints ?? loadedHere?.count ?? null;
+  const wpTotal = liveForMission?.waypointTotal ?? piStatus?.totalWaypoints ?? cloudWp?.totalWaypoints ?? loadedHere?.count ?? null;
   const wpDone = liveForMission?.navigation?.completedWaypoints ?? piStatus?.completedWaypoints ?? null;
   const distToTarget = liveForMission?.navigation?.distanceToTargetM ?? null;
   const target = liveForMission?.navigation?.target ?? null;
