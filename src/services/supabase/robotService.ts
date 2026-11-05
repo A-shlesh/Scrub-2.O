@@ -7,7 +7,7 @@ import { supabase, supabaseConfigured } from './supabaseClient';
 /** The robot this dashboard controls. */
 export const ROBOT_ID = (import.meta.env.VITE_ROBOT_ID as string | undefined)?.trim() || 'BOT001';
 
-export type RobotCommand = 'LOAD_WAYPOINTS' | 'START' | 'PAUSE' | 'RESUME' | 'STOP' | 'EMERGENCY_STOP';
+export type RobotCommand = 'LOAD_WAYPOINTS' | 'START' | 'PAUSE' | 'RESUME' | 'STOP' | 'RETURN_HOME' | 'EMERGENCY_STOP';
 export type CommandStatus = 'PENDING' | 'ACKED' | 'REJECTED' | 'EXPIRED';
 
 export interface CommandRow {
@@ -29,6 +29,7 @@ export const ACK_TIMEOUT_MS: Record<RobotCommand, number> = {
   PAUSE: 15_000,
   RESUME: 15_000,
   STOP: 15_000,
+  RETURN_HOME: 15_000,
   EMERGENCY_STOP: 15_000,
 };
 
@@ -127,7 +128,7 @@ export async function command(cmd: RobotCommand, missionId: string | null, paylo
 
 /** One-line description of the robot's answer, for the UI. */
 export function describeAnswer(cmd: RobotCommand, row: CommandRow): string {
-  const name = cmd.replace('_', ' ').toLowerCase();
+  const name = cmd === 'RETURN_HOME' ? 'return to GCS' : cmd.replace('_', ' ').toLowerCase();
   if (row.status === 'ACKED') return `Robot confirmed ${name}.`;
   if (row.status === 'REJECTED') return `Robot refused ${name}${row.detail ? `: ${row.detail}` : '.'}`;
   if (row.status === 'EXPIRED') return `No answer from the robot for ${name}. The command was cancelled, so the robot will not act on it.`;

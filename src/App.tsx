@@ -7,10 +7,12 @@ import { ObservatoryPage } from './pages/Observatory';
 import { MissionPage } from './pages/Mission';
 import { TelemetryPage } from './pages/Telemetry';
 import { AnalyticsPage } from './pages/Analytics';
+import { AuthGate } from './components/AuthGate';
 
 export default function App() {
   return (
     <ThemeProvider>
+      <AuthGate>
       <TelemetryProvider>
         <LakeProvider>
           <BrowserRouter>
@@ -24,6 +26,7 @@ export default function App() {
           </BrowserRouter>
         </LakeProvider>
       </TelemetryProvider>
+      </AuthGate>
     </ThemeProvider>
   );
 }

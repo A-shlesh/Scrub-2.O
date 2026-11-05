@@ -24,7 +24,7 @@ The dashboard inserts:
 | `command_id` | uuid, made by the dashboard |
 | `device_id` | `BOT001` |
 | `mission_id` | the mission it is about |
-| `command` | `LOAD_WAYPOINTS`, `START`, `PAUSE`, `RESUME`, `STOP` or `EMERGENCY_STOP` |
+| `command` | `LOAD_WAYPOINTS`, `START`, `PAUSE`, `RESUME`, `STOP`, `RETURN_HOME` or `EMERGENCY_STOP` |
 | `payload` | `waypoints.json` (below) for `LOAD_WAYPOINTS`, otherwise null |
 | `status` | `PENDING` |
 
@@ -92,6 +92,20 @@ Rules the Pi must enforce itself (never rely on the dashboard):
   the bank), so place it where the robot can reach the water directly.
 - While driving from the last sampling cell back to the GCS, report
   `mission_state: "returning"`; report `completed` only after reaching the GCS.
+- If the straight line home would cross an island, the dashboard adds `detour`
+  waypoints after the last sampling cell, so the robot goes back through the
+  water to the first cell and leaves the lake the way it came in. Just follow
+  the waypoints in order.
+
+### `RETURN_HOME` command
+
+Sent by the "Return to GCS" button (during a mission, or after it was stopped).
+The robot ends the mission (no more sampling) and drives back to the GCS of the
+loaded `waypoints.json`. Safest route: go back along the waypoints already
+driven, or to the first waypoint and then to the GCS; never straight across land.
+ACK with `{"mission_state": "returning"}`, report `returning` while driving, and
+`completed` once at the GCS. REJECT (with a reason in `detail`) if no plan with a
+GCS is loaded.
 - `grid_id`: the `grids` row of the cell, or null.
 - `lat`/`lon` have at most 7 decimals.
 

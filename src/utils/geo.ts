@@ -451,6 +451,13 @@ export function coveragePath(cells: GridCell[]): LatLon[] {
 }
 
 /** True when the straight leg a->b crosses no shore or island edge (endpoints are assumed to be in water). */
+/** How many of `segs` the straight leg a-b crosses. */
+function crossingCount(a: number[], b: number[], segs: number[][]): number {
+  let n = 0;
+  for (const s of segs) if (!legClear(a, b, [s])) n++;
+  return n;
+}
+
 function legClear(a: number[], b: number[], segs: number[][]): boolean {
   const minX = Math.min(a[0], b[0]);
   const maxX = Math.max(a[0], b[0]);
@@ -481,17 +488,8 @@ export interface CoveragePlan {
   blocked: Array<[LatLon, LatLon]>;
 }
 
-/**
- * Coverage path that stays in the water. Every leg of the serpentine is checked
- * against the shore and islands; a leg that would cross land is replaced by the
- * shortest chain of neighbouring grid cells (Dijkstra). Legs that cannot be
- * routed are reported in `blocked` instead of silently left crossing land.
- */
-export function planCoverage(cells: GridCell[], boundary: LatLon[] | null, holes: LatLon[][] = []): CoveragePlan {
-  const order = orderedCells(cells);
-  const plain: CoveragePlan = { path: order.map((c) => c.center), kinds: order.map(() => 'lane'), detours: [], blocked: [] };
-  if (order.length < 2 || !boundary || boundary.length < 3) return plain;
-
+/** Leg checks and shortest in-water chains of neighbouring cells, over `order`. */
+function cellRouter(order: GridCell[], boundary: LatLon[], holes: LatLon[][]) {
   const refLat = boundary.reduce((s, p) => s + p.lat, 0) / boundary.length;
   const lonScale = mPerDegLon(refLat);
   const segs = [boundary, ...holes.filter((h) => h.length >= 3)].flatMap((r) => ringSegmentsM(r, lonScale));
@@ -570,6 +568,20 @@ export function planCoverage(cells: GridCell[], boundary: LatLon[] | null, holes
     while (chain[chain.length - 1] !== from) chain.push(prev.get(chain[chain.length - 1]) as number);
     return chain.reverse();
   };
+  return { segs, xy, route };
+}
+
+/**
+ * Coverage path that stays in the water. Every leg of the serpentine is checked
+ * against the shore and islands; a leg that would cross land is replaced by the
+ * shortest chain of neighbouring grid cells (Dijkstra). Legs that cannot be
+ * routed are reported in `blocked` instead of silently left crossing land.
+ */
+export function planCoverage(cells: GridCell[], boundary: LatLon[] | null, holes: LatLon[][] = []): CoveragePlan {
+  const order = orderedCells(cells);
+  const plain: CoveragePlan = { path: order.map((c) => c.center), kinds: order.map(() => 'lane'), detours: [], blocked: [] };
+  if (order.length < 2 || !boundary || boundary.length < 3) return plain;
+  const { segs, xy, route } = cellRouter(order, boundary, holes);
 
   const path: LatLon[] = [order[0].center];
   const kinds: Array<'lane' | 'detour'> = ['lane'];
@@ -651,4 +663,34 @@ export function downloadCsv(csv: string, filename: string): void {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * How often the straight leg a-b crosses the lake shore and the island outlines.
+ * A leg from a point on the bank into the lake crosses the shore once.
+ */
+export function shoreCrossings(a: LatLon, b: LatLon, boundary: LatLon[], holes: LatLon[][] = []): { shore: number; islands: number } {
+  const lonScale = mPerDegLon((a.lat + b.lat) / 2);
+  const xy = (p: LatLon) => [p.lon * lonScale, p.lat * M_PER_DEG_LAT];
+  const islandSegs = holes.filter((h) => h.length >= 3).flatMap((r) => ringSegmentsM(r, lonScale));
+  return {
+    shore: boundary.length >= 3 ? crossingCount(xy(a), xy(b), ringSegmentsM(boundary, lonScale)) : 0,
+    islands: crossingCount(xy(a), xy(b), islandSegs),
+  };
+}
+
+/**
+ * In-water route between two grid-cell centres: the cell centres to pass through in
+ * between ([] when the straight leg is already in water), or null when there is none.
+ */
+export function waterRoute(cells: GridCell[], boundary: LatLon[] | null, holes: LatLon[][], from: LatLon, to: LatLon): LatLon[] | null {
+  if (!boundary || boundary.length < 3) return [];
+  const key = (p: LatLon) => `${p.lat.toFixed(9)},${p.lon.toFixed(9)}`;
+  const { segs, xy, route } = cellRouter(cells, boundary, holes);
+  if (legClear(xy(from), xy(to), segs)) return [];
+  const i = cells.findIndex((c) => key(c.center) === key(from));
+  const j = cells.findIndex((c) => key(c.center) === key(to));
+  if (i < 0 || j < 0) return null;
+  const chain = route(i, j);
+  return chain ? chain.slice(1, -1).map((k) => cells[k].center) : null;
 }
