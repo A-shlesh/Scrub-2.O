@@ -1,8 +1,13 @@
-import { useEffect, useState } from 'react';
-import { Beaker, Compass, Cpu, Droplet, Droplets, FlaskConical, MapPin, Thermometer, Wifi, Zap } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Beaker, Compass, Cpu, Droplet, Droplets, FlaskConical, MapPin, Thermometer, Waypoints, Wifi, Zap } from 'lucide-react';
+import { ChartCard } from '../components/ChartCard';
 import { Navbar } from '../components/Navbar';
 import { PageHeader } from '../components/PageHeader';
 import { SensorCard } from '../components/SensorCard';
+import { fetchDeviceSamples } from '../services/supabase/supabaseService';
+import { ROBOT_ID } from '../services/supabase/robotService';
+import { supabaseConfigured } from '../services/supabase/supabaseClient';
+import type { SensorKey, SensorSample, SeriesPoint } from '../types';
 import { useTelemetry } from '../stores/telemetry';
 import { DEMO } from '../demo/demo';
 import { aqiBand, compassPoint, fmtGpsDetailed, fmtMissionState, timeAgo } from '../utils/format';
@@ -21,6 +26,50 @@ function useNow(intervalMs = 1000): number {
 
 const round = (v: number | null | undefined, digits = 0): string | null =>
   v === null || v === undefined || !Number.isFinite(v) ? null : v.toFixed(digits);
+
+/** The robot uploads one record every 10 s; the dashboard reads them at the same pace. */
+const HISTORY_REFRESH_MS = 10_000;
+const HISTORY_WINDOW_MS = 30 * 60 * 1000;
+const HISTORY_CHARTS: Array<{ key: SensorKey; title: string; unit: string }> = [
+  { key: 'ph', title: 'pH', unit: '' },
+  { key: 'tds', title: 'TDS', unit: 'ppm' },
+  { key: 'turbidity', title: 'Turbidity', unit: 'NTU' },
+  { key: 'temperature_c', title: 'Temperature', unit: '°C' },
+];
+
+/** Cloud sensor records for this robot over the last 30 minutes, refreshed every 10 s. */
+function useCloudHistory(enabled: boolean): { samples: SensorSample[]; error: string | null; loadedAt: number | null } {
+  const [samples, setSamples] = useState<SensorSample[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loadedAt, setLoadedAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    let inFlight = false;
+    const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const rows = await fetchDeviceSamples(ROBOT_ID, Date.now() - HISTORY_WINDOW_MS);
+        if (cancelled) return;
+        setSamples(rows);
+        setError(null);
+        setLoadedAt(Date.now());
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Could not load sensor history.');
+      } finally {
+        inFlight = false;
+      }
+    };
+    load();
+    const id = window.setInterval(load, HISTORY_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [enabled]);
+  return { samples, error, loadedAt };
+}
 
 export function TelemetryPage() {
   const { telemetry, connection, live } = useTelemetry();
@@ -63,6 +112,20 @@ export function TelemetryPage() {
   const battery = telemetry?.batteryPercent ?? null;
   const batteryTone = batteryStatus(battery);
   const missionLabel = telemetry ? fmtMissionState(telemetry.missionState) : '-';
+  const wp = typeof telemetry?.currentWaypoint === 'number' ? telemetry.currentWaypoint : null;
+  const wpTotal = telemetry?.waypointTotal ?? null;
+  const progressLabel = wp !== null && wpTotal ? `${wp} / ${wpTotal} (${Math.min(100, Math.round((wp / wpTotal) * 100))}%)` : '—';
+
+  const history = useCloudHistory(supabaseConfigured && !DEMO);
+  const series = useMemo(() => {
+    const out = {} as Record<SensorKey, SeriesPoint[]>;
+    for (const c of HISTORY_CHARTS) {
+      out[c.key] = history.samples
+        .filter((s) => typeof s[c.key] === 'number' && Number.isFinite(s[c.key]))
+        .map((s) => ({ t: s.recorded_at, v: s[c.key] as number }));
+    }
+    return out;
+  }, [history.samples]);
 
   return (
     <>
@@ -124,6 +187,10 @@ export function TelemetryPage() {
             <div className="v">{speedLabel}</div>
           </div>
           <div className="strip-item">
+            <div className="k"><Waypoints size={14} />Mission progress</div>
+            <div className="v">{progressLabel}</div>
+          </div>
+          <div className="strip-item">
             <div className="k"><Wifi size={14} />Network</div>
             <div className="v">
               <span className={`dot ${connection.status === 'connected' ? 'live' : connection.status === 'connecting' ? 'working' : 'error'}`} aria-hidden="true" />
@@ -131,6 +198,31 @@ export function TelemetryPage() {
             </div>
           </div>
         </div>
+
+        {supabaseConfigured && !DEMO && (
+          <>
+            <div className="section-label">
+              Sensor history · last 30 min from the cloud · updates every 10 s
+              {history.loadedAt ? ` · ${history.samples.length} records` : ''}
+            </div>
+            {history.error && (
+              <div className="notice error" role="alert">
+                Could not load sensor history: {history.error}. Check that the mission-control migration (device_id column) has been applied.
+              </div>
+            )}
+            <div className="history-grid">
+              {HISTORY_CHARTS.map((c) => (
+                <ChartCard
+                  key={c.key}
+                  title={c.title}
+                  unit={c.unit}
+                  points={series[c.key]}
+                  emptyHint={`No ${c.title} records from ${ROBOT_ID} in the last 30 minutes.`}
+                />
+              ))}
+            </div>
+          </>
+        )}
         {DEMO && <p className="demo-note">Demo data — set VITE_DEMO=0 to use live sources.</p>}
       </main>
     </>

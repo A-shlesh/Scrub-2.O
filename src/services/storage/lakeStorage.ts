@@ -1,4 +1,4 @@
-import type { GridConfiguration, Lake, LatLon } from '../../types';
+import type { GridConfiguration, Lake } from '../../types';
 
 export interface GridSnapshot {
   lakeId: string;
@@ -16,7 +16,7 @@ const GRID_SNAPSHOTS_KEY = 'scrub:gridSnapshots';
 const DELETED_DEMOS_KEY = 'scrub:deletedDemos';
 const DELETED_IDS_KEY = 'scrub:deletedIds';
 const SUPABASE_LAKE_IDS_KEY = 'scrub:supabaseLakeIds';
-const SUPABASE_GRID_IDS_KEY = 'scrub:supabaseGridIds';
+const MISSION_IDS_KEY = 'scrub:missionIds';
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -43,15 +43,55 @@ export function getOrCreateSupabaseLakeId(lakeId: string): string {
   return uuid;
 }
 
-/** One stable UUID per (Supabase lake_id, grid_code), so re-syncing a lake updates the same grid rows instead of duplicating them. */
-export function getOrCreateSupabaseGridId(supabaseLakeId: string, gridCode: string): string {
-  const key = `${supabaseLakeId}:${gridCode}`;
-  const all = readJson<Record<string, string>>(SUPABASE_GRID_IDS_KEY, {});
-  if (all[key]) return all[key];
-  const uuid = crypto.randomUUID();
-  all[key] = uuid;
-  writeJson(SUPABASE_GRID_IDS_KEY, all);
-  return uuid;
+/** The Supabase lake_id already assigned to a SCRUB lake id, without creating one. */
+export function getSupabaseLakeId(lakeId: string): string | null {
+  return readJson<Record<string, string>>(SUPABASE_LAKE_IDS_KEY, {})[lakeId] ?? null;
+}
+
+/**
+ * The SCRUB lake id whose Supabase row a lake's data is stored under.
+ * A sample polygon drawn inside a real lake stores its grids under that parent lake,
+ * so every read and write must use this, never `lake.id` directly.
+ */
+export function supabaseLakeKey(lake: Pick<Lake, 'id' | 'parentLakeId'>): string {
+  return lake.parentLakeId ?? lake.id;
+}
+
+// ── Missions created from this browser ─────────────────────────────────
+
+/** Remember the mission most recently created for a SCRUB lake id (sample polygons included). */
+export function rememberMissionId(lakeId: string, missionId: string): void {
+  const all = readJson<Record<string, string>>(MISSION_IDS_KEY, {});
+  all[lakeId] = missionId;
+  writeJson(MISSION_IDS_KEY, all);
+}
+
+export function loadMissionId(lakeId: string): string | null {
+  return readJson<Record<string, string>>(MISSION_IDS_KEY, {})[lakeId] ?? null;
+}
+
+// ── Sample polygon numbering ───────────────────────────────────────────
+
+/**
+ * Highest N of any `sam:N` id this browser has ever used: saved, recent, deleted, or
+ * already mapped to a Supabase lake. Deleted ids count too, so a number is never reused
+ * for a different polygon.
+ */
+export function maxLocalSampleNumber(): number {
+  const ids = new Set<string>([
+    ...Object.keys(readJson<Record<string, Lake>>(LAKES_KEY, {})),
+    ...readJson<Lake[]>(RECENT_KEY, []).map((l) => l.id),
+    ...readJson<string[]>(DELETED_IDS_KEY, []),
+    ...Object.keys(readJson<Record<string, string>>(SUPABASE_LAKE_IDS_KEY, {})),
+  ]);
+  const saved = readJson<Lake | null>(SAVED_LAKE_KEY, null);
+  if (saved) ids.add(saved.id);
+  let max = 0;
+  for (const id of ids) {
+    const m = /^sam:(\d+)$/.exec(id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max;
 }
 
 function writeJson(key: string, value: unknown): void {

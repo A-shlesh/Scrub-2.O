@@ -4,6 +4,8 @@ import type { ConnectionState, Telemetry } from '../types';
 import { NullRealtimeService, staleAfterMs } from '../services/realtime/realtimeService';
 import type { RealtimeService } from '../services/realtime/realtimeService';
 import { DEMO, DemoRealtimeService } from '../demo/demo';
+import { SupabaseRealtimeService } from '../services/realtime/supabaseRealtimeService';
+import { supabaseConfigured } from '../services/supabase/supabaseClient';
 
 interface TelemetryCtx {
   telemetry: Telemetry | null;
@@ -20,9 +22,13 @@ const Ctx = createContext<TelemetryCtx>({
   reconnect: () => undefined,
 });
 
-// Single shared instance while AWS IoT Core is unimplemented.
+// Single shared instance: live telemetry over Supabase Realtime when Supabase is configured.
 // VITE_DEMO=1 swaps in synthetic telemetry for design review only.
-const service: RealtimeService = DEMO ? new DemoRealtimeService() : new NullRealtimeService();
+const service: RealtimeService = DEMO
+  ? new DemoRealtimeService()
+  : supabaseConfigured
+    ? new SupabaseRealtimeService()
+    : new NullRealtimeService();
 
 export function TelemetryProvider({ children }: { children: ReactNode }) {
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null);

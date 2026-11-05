@@ -1,14 +1,59 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { Navbar } from '../components/Navbar';
 import { ObservatoryMap } from '../components/ObservatoryMap';
 import { PageHeader } from '../components/PageHeader';
 import { useLake } from '../stores/lake';
 import { DEMO } from '../demo/demo';
-import { computeGridAnalytics, fetchGridCells, fetchSensorSamples, fetchSessionStats, fetchVisitedGridIds, SENSORS } from '../services/supabase/supabaseService';
-import type { GridAnalytics, GridCellAverage, SensorAverage, SensorKey } from '../types';
+import {
+  computeGridAnalytics,
+  fetchLakeGrids,
+  fetchSensorSamples,
+  fetchVisitedGridIds,
+  matchGridsToCells,
+  SENSORS,
+} from '../services/supabase/supabaseService';
+import type { GridAnalytics, GridCell, GridCellAverage, Lake, SensorAverage, SensorKey } from '../types';
 
-const RANGES = ['Last 24 Hours', 'Last 7 Days', 'Last 30 Days'] as const;
+const HOUR_MS = 60 * 60 * 1000;
+const RANGES = [
+  { label: 'All Time', ms: null },
+  { label: 'Last 24 Hours', ms: 24 * HOUR_MS },
+  { label: 'Last 7 Days', ms: 7 * 24 * HOUR_MS },
+  { label: 'Last 30 Days', ms: 30 * 24 * HOUR_MS },
+] as const;
+type RangeLabel = (typeof RANGES)[number]['label'];
+const REFRESH_MS = 10_000; // the robot uploads one sensor record every 10 s
+
+/**
+ * Load analytics for the grid currently shown. Heatmap cells are the Supabase grid rows
+ * that match a cell on screen (same size and centre), keyed by the local cell id.
+ * Sensor cards cover the whole lake's history, except for a sample polygon, which shares
+ * its parent lake's rows and so only counts its own cells.
+ */
+async function loadLakeAnalytics(
+  lake: Lake,
+  cells: GridCell[],
+  cellSizeM: number,
+  sinceMs: number | null,
+): Promise<{ analytics: GridAnalytics; visited: Set<string> }> {
+  const grids = await fetchLakeGrids(lake);
+  const shown = matchGridsToCells(grids, cells, cellSizeM); // grid_id -> local cell id
+  const cellById = new Map(cells.map((c) => [c.id, c]));
+  const shownIds = [...shown.keys()];
+  const summaryIds = lake.parentLakeId ? shownIds : grids.map((g) => g.gridId);
+  const [samples, visitedGridIds] = await Promise.all([fetchSensorSamples(summaryIds, sinceMs), fetchVisitedGridIds(shownIds)]);
+  const heatCells = shownIds.map((gridId) => {
+    const cell = cellById.get(shown.get(gridId) as string) as GridCell;
+    return { gridId, gridCode: cell.id, centerLat: cell.center.lat, centerLon: cell.center.lon };
+  });
+  const visited = new Set<string>();
+  for (const id of visitedGridIds) {
+    const cellId = shown.get(id);
+    if (cellId) visited.add(cellId);
+  }
+  return { analytics: computeGridAnalytics(lake.id, samples, heatCells), visited };
+}
 
 /** Interpolate between color stops based on value fraction (0–1). */
 function heatmapColor(colors: [string, string, string, string, string], t: number): string {
@@ -66,8 +111,8 @@ function SensorCard({
 }
 
 export function AnalyticsPage() {
-  const { lake, recent, cells, selectLake } = useLake();
-  const [range, setRange] = useState<(typeof RANGES)[number]>('Last 7 Days');
+  const { lake, recent, cells, cellSizeM, selectLake } = useLake();
+  const [range, setRange] = useState<RangeLabel>('All Time');
   const [analytics, setAnalytics] = useState<GridAnalytics | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,52 +120,51 @@ export function AnalyticsPage() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [visitedGridIds, setVisitedGridIds] = useState<Set<string>>(new Set());
 
-  const loadData = useCallback(async () => {
-    if (!lake) { setAnalytics(null); setVisitedGridIds(new Set()); return; }
-    setLoading(true);
-    setError(null);
-    try {
-      if (DEMO) {
-        // Demo: generate synthetic analytics from the current grid
-        const demoAnalytics = generateDemoAnalytics(lake.id, cells.map((c) => ({ gridId: `demo-${c.id}`, gridCode: c.id, centerLat: c.center.lat, centerLon: c.center.lon })));
-        setAnalytics(demoAnalytics);
-        setVisitedGridIds(new Set());
-      } else {
-        const [grids, samples, visited] = await Promise.all([
-          fetchGridCells(lake.id),
-          fetchSensorSamples(lake.id),
-          fetchVisitedGridIds(lake.id),
-        ]);
-        setAnalytics(computeGridAnalytics(lake.id, samples, grids));
-        setVisitedGridIds(visited);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not load analytics.');
-    } finally {
-      setLoading(false);
-    }
-  }, [lake?.id, cells, range]);
-
-  // Initial load
-  useEffect(() => { loadData(); }, [loadData]);
-
-  // Auto-refresh: poll every 8 seconds to detect newly completed sessions
+  // Load once, then refresh every 10 s to pick up new records and completed sessions.
+  // Results from a previous lake, grid or range are dropped, and ticks never overlap.
   useEffect(() => {
-    if (DEMO || !lake) return;
-    const id = window.setInterval(() => {
-      // Silently refresh visited + analytics in the background
-      (async () => {
-        const [grids, samples, visited] = await Promise.all([
-          fetchGridCells(lake.id),
-          fetchSensorSamples(lake.id),
-          fetchVisitedGridIds(lake.id),
-        ]);
-        setAnalytics(computeGridAnalytics(lake.id, samples, grids));
-        setVisitedGridIds(visited);
-      })();
-    }, 8000);
-    return () => window.clearInterval(id);
-  }, [lake?.id]);
+    setError(null);
+    if (!lake) {
+      setAnalytics(null);
+      setVisitedGridIds(new Set());
+      return;
+    }
+    if (DEMO) {
+      setAnalytics(generateDemoAnalytics(lake.id, cells.map((c) => ({ gridId: `demo-${c.id}`, gridCode: c.id, centerLat: c.center.lat, centerLon: c.center.lon }))));
+      setVisitedGridIds(new Set());
+      return;
+    }
+    const rangeMs = RANGES.find((r) => r.label === range)?.ms ?? null;
+    let cancelled = false;
+    let inFlight = false;
+    const run = async (initial: boolean) => {
+      if (inFlight) return;
+      inFlight = true;
+      if (initial) {
+        setLoading(true);
+        setAnalytics(null);
+        setVisitedGridIds(new Set());
+      }
+      try {
+        const r = await loadLakeAnalytics(lake, cells, cellSizeM, rangeMs === null ? null : Date.now() - rangeMs);
+        if (cancelled) return;
+        setAnalytics(r.analytics);
+        setVisitedGridIds(r.visited);
+        setError(null);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Could not load analytics.');
+      } finally {
+        inFlight = false;
+        if (initial && !cancelled) setLoading(false);
+      }
+    };
+    run(true);
+    const id = window.setInterval(() => run(false), REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [lake, cells, cellSizeM, range]);
 
   const meta = SENSORS.find((s) => s.key === selectedSensor) ?? SENSORS[0];
 
@@ -162,9 +206,9 @@ export function AnalyticsPage() {
           right={
             <label className="select-wrap">
               <span className="sr-only" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>Time range</span>
-              <select value={range} onChange={(e) => setRange(e.target.value as (typeof RANGES)[number])}>
+              <select value={range} onChange={(e) => setRange(e.target.value as RangeLabel)}>
                 {RANGES.map((r) => (
-                  <option key={r}>{r}</option>
+                  <option key={r.label}>{r.label}</option>
                 ))}
               </select>
               <ChevronDown size={16} />
