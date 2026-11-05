@@ -49,19 +49,35 @@ async function selectAll<T>(page: (from: number, to: number) => PageResult<T>): 
   }
 }
 
-// ── Tables (Supabase project used by the dashboard) ────────────────────────
-//   lakes(lake_id, name, created_at)
-//   missions(mission_id, device_id, lake_id, status, started_at, completed_at, created_at, notes,
-//            total_waypoints, current_waypoint_index)
-//   mission_waypoints(waypoint_id, mission_id, sequence_order, latitude, longitude, status, created_at)
-//   sensor_readings(reading_id, mission_id, device_id, recorded_at, created_at, latitude, longitude,
-//                   heading, ph, tds, turbidity, temperature_c, humidity_percent)
+// ── Shared schema: supabase/schema.sql, rules in docs/supabase-schema.md ─────
+//   lakes(lake_id, name, boundary_geom, created_at)
+//   missions(mission_id, device_id, lake_id, polygon_geom, status, waypoint_load_ack, total_waypoints,
+//            current_waypoint_index, progress_percent, started_at, completed_at, created_at, notes)
+//   mission_waypoints(waypoint_id, mission_id, sequence_order, latitude, longitude, waypoint_geom, status, created_at)
+//   sensor_readings(reading_id, local_record_id, mission_id, device_id, recorded_at, latitude, longitude,
+//                   position_geom, heading, ph, tds, turbidity, temperature_c, humidity_percent, created_at)
+
+/** EWKT polygon (closed ring, longitude first), as PostGIS reads it. */
+export function polygonEwkt(points: LatLon[]): string {
+  const ring = openRing(points);
+  const closed = [...ring, ring[0]];
+  return `SRID=4326;POLYGON((${closed.map((p) => `${p.lon} ${p.lat}`).join(', ')}))`;
+}
+
+/** EWKT point (longitude first). */
+export function pointEwkt(lat: number, lon: number): string {
+  return `SRID=4326;POINT(${lon} ${lat})`;
+}
+
+/** Mission status values (missions.status). */
+export type MissionRowStatus = 'PENDING' | 'LOADING_WAYPOINTS' | 'READY' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'ABORTED' | 'FAILED';
 
 const READING_COLUMNS =
-  'reading_id, mission_id, device_id, recorded_at, created_at, latitude, longitude, heading, ph, tds, turbidity, temperature_c, humidity_percent';
+  'reading_id, local_record_id, mission_id, device_id, recorded_at, created_at, latitude, longitude, heading, ph, tds, turbidity, temperature_c, humidity_percent';
 
 interface ReadingRow {
   reading_id: string;
+  local_record_id?: string | null;
   mission_id: string | null;
   device_id: string | null;
   recorded_at: string;
@@ -109,8 +125,7 @@ export async function pushLake(lake: Lake): Promise<string> {
   const boundary = lake.scrubBoundary?.points ?? lake.osmBoundary?.points ?? null;
   if (!boundary || boundary.length < 3) throw new Error('This lake has no boundary to send.');
   const lakeId = getOrCreateSupabaseLakeId(supabaseLakeKey(lake));
-  // The outline itself travels with each mission (payload polygon); the row only names the lake.
-  const row = { lake_id: lakeId, name: lake.name ?? 'Unnamed', created_at: utcIso() };
+  const row = { lake_id: lakeId, name: lake.name ?? 'Unnamed', boundary_geom: polygonEwkt(boundary), created_at: utcIso() };
   const { error } = lake.parentLakeId
     ? await sb.from('lakes').upsert(row, { onConflict: 'lake_id', ignoreDuplicates: true })
     : await sb.from('lakes').upsert(row);
@@ -120,8 +135,9 @@ export async function pushLake(lake: Lake): Promise<string> {
 
 /**
  * Record the mission before the plan is sent to the robot: a `missions` row (status PENDING,
- * total_waypoints) and one `mission_waypoints` row per waypoint in visiting order
- * (sequence_order 0 = GCS). If the waypoints cannot be stored, the mission is removed again.
+ * polygon_geom, total_waypoints, waypoint_load_ack false, progress 0) and one
+ * `mission_waypoints` row per waypoint in visiting order (sequence_order 0 = GCS).
+ * If the waypoints cannot be stored, the mission is removed again.
  * `localLakeId` is the SCRUB lake the mission is remembered under.
  */
 export async function createMission(localLakeId: string, supabaseLakeId: string, payload: MissionPayload): Promise<void> {
@@ -130,10 +146,14 @@ export async function createMission(localLakeId: string, supabaseLakeId: string,
     mission_id: payload.mission_id,
     device_id: payload.device_id,
     lake_id: supabaseLakeId,
-    status: 'PENDING',
+    polygon_geom: polygonEwkt(payload.polygon.map((p) => ({ lat: p.latitude, lon: p.longitude }))),
+    status: 'PENDING' satisfies MissionRowStatus,
+    waypoint_load_ack: false,
+    total_waypoints: payload.waypoint_count,
+    current_waypoint_index: null,
+    progress_percent: 0,
     created_at: payload.created_at,
     notes: null,
-    total_waypoints: payload.waypoint_count,
   });
   if (error) throw new Error(`Could not create mission: ${error.message}`);
 
@@ -143,6 +163,7 @@ export async function createMission(localLakeId: string, supabaseLakeId: string,
     sequence_order: w.sequence_order,
     latitude: w.latitude,
     longitude: w.longitude,
+    waypoint_geom: pointEwkt(w.latitude, w.longitude),
     status: 'PENDING',
     created_at: payload.created_at,
   }));
@@ -158,27 +179,52 @@ export async function createMission(localLakeId: string, supabaseLakeId: string,
   rememberMissionId(localLakeId, payload.mission_id);
 }
 
-/** Mark a mission ABORTED (e.g. the robot never loaded its waypoints). Best effort: errors are ignored. */
+/** The plan is on its way to the robot: status LOADING_WAYPOINTS. Best effort. */
+export async function markMissionLoading(missionId: string): Promise<void> {
+  if (!supabaseConfigured || !supabase) return;
+  await supabase.from('missions').update({ status: 'LOADING_WAYPOINTS' }).eq('mission_id', missionId).eq('status', 'PENDING');
+}
+
+/**
+ * Mark a mission FAILED when the robot did not store its waypoints (refused, no answer,
+ * wrong checksum). Only while it is still being loaded. Best effort: errors are ignored.
+ */
 export async function abandonMission(missionId: string, reason: string): Promise<void> {
   if (!supabaseConfigured || !supabase) return;
-  await supabase.from('missions').update({ status: 'ABORTED', notes: reason }).eq('mission_id', missionId).eq('status', 'PENDING');
+  await supabase
+    .from('missions')
+    .update({ status: 'FAILED', notes: reason })
+    .eq('mission_id', missionId)
+    .in('status', ['PENDING', 'LOADING_WAYPOINTS']);
 }
 
 export interface LatestMission {
   missionId: string | null;
   /** missions.status as kept by the robot: PENDING, ACTIVE, PAUSED, COMPLETED, ABORTED */
   status: string | null;
-  /** missions.current_waypoint_index / total_waypoints, as kept by the robot */
+  /** missions.current_waypoint_index / total_waypoints / progress_percent, as kept by the robot */
   currentWaypoint: number | null;
   totalWaypoints: number | null;
+  progressPercent: number | null;
+  /** missions.waypoint_load_ack: the Pi confirmed it stored the waypoints */
+  loadAck: boolean;
 }
 
-type MissionRow = { mission_id: string; status: string; current_waypoint_index: number | null; total_waypoints: number | null };
+type MissionRow = {
+  mission_id: string;
+  status: string;
+  current_waypoint_index: number | null;
+  total_waypoints: number | null;
+  progress_percent: number | string | null;
+  waypoint_load_ack: boolean | null;
+};
 const toLatest = (m: MissionRow): LatestMission => ({
   missionId: m.mission_id,
   status: m.status,
   currentWaypoint: numOrNull(m.current_waypoint_index),
   totalWaypoints: numOrNull(m.total_waypoints),
+  progressPercent: numOrNull(m.progress_percent),
+  loadAck: m.waypoint_load_ack === true,
 });
 
 /**
@@ -186,10 +232,10 @@ const toLatest = (m: MissionRow): LatestMission => ({
  * remembered, the lake's latest mission. A sample polygon only ever shows its own mission.
  */
 export async function fetchLatestMission(lake: Lake): Promise<LatestMission> {
-  const EMPTY: LatestMission = { missionId: null, status: null, currentWaypoint: null, totalWaypoints: null };
+  const EMPTY: LatestMission = { missionId: null, status: null, currentWaypoint: null, totalWaypoints: null, progressPercent: null, loadAck: false };
   if (!supabaseConfigured || !supabase) return EMPTY;
   const sb = supabase;
-  const cols = 'mission_id, status, current_waypoint_index, total_waypoints';
+  const cols = 'mission_id, status, current_waypoint_index, total_waypoints, progress_percent, waypoint_load_ack';
   const remembered = loadMissionId(lake.id);
   if (remembered) {
     const { data, error } = await sb.from('missions').select(cols).eq('mission_id', remembered).maybeSingle();

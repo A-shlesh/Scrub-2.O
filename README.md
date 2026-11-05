@@ -3,6 +3,7 @@
 Lake-monitoring dashboard for the SCRUB robot: live telemetry, lake selection on
 OpenStreetMap, lake polygons, polygon coverage missions (GCS → zigzag → GCS),
 sensor history and analytics. Robot contract: `docs/robot-protocol.md`.
+Shared Supabase schema (same in the Pi backend): `supabase/schema.sql`, `docs/supabase-schema.md`.
 
 ## Run it
 

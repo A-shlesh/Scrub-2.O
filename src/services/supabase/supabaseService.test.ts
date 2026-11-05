@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { GridCell, SensorSample } from '../../types';
 import { generateGrid } from '../../utils/geo';
-import { computeGridAnalytics, readingToSample } from './supabaseService';
+import { computeGridAnalytics, pointEwkt, polygonEwkt, readingToSample } from './supabaseService';
 
 const square = [
   { lat: 12.97, lon: 77.59 },
@@ -27,6 +27,15 @@ function sample(gridId: string, ph: number | null, session = 's1'): SensorSample
     created_at: '2026-01-01T00:00:00+05:30',
   };
 }
+
+describe('geometry columns (boundary_geom, polygon_geom, waypoint_geom)', () => {
+  it('writes EWKT with longitude first and a closed ring', () => {
+    expect(pointEwkt(12.91686, 77.48698)).toBe('SRID=4326;POINT(77.48698 12.91686)');
+    expect(polygonEwkt([{ lat: 1, lon: 2 }, { lat: 3, lon: 4 }, { lat: 5, lon: 6 }])).toBe('SRID=4326;POLYGON((2 1, 4 3, 6 5, 2 1))');
+    // an already-closed ring is not closed twice
+    expect(polygonEwkt([{ lat: 1, lon: 2 }, { lat: 3, lon: 4 }, { lat: 5, lon: 6 }, { lat: 1, lon: 2 }])).toBe('SRID=4326;POLYGON((2 1, 4 3, 6 5, 2 1))');
+  });
+});
 
 describe('readingToSample', () => {
   it('maps a sensor_readings row (heading, reading_id) to the page shape', () => {
