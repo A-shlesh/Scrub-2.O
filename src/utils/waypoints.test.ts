@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { generateGrid, planCoverage } from './geo';
-import { buildWaypointsFile, canonicalWaypointText, cellIdsForPath, planWaypoints, waypointChecksum } from './waypoints';
+import { buildWaypointsFile, canonicalWaypointText, cellIdsForPath, planWaypoints, routeWithGcs, waypointChecksum } from './waypoints';
 import type { Waypoint } from './waypoints';
 
 const sample: Waypoint[] = [
@@ -47,5 +47,29 @@ describe('planWaypoints', () => {
     expect(file.count).toBe(wps.length);
     expect(file.sha256).toBe(await waypointChecksum(wps));
     expect(file.waypoints.every((w) => w.grid_id === null)).toBe(true);
+  });
+
+  it('starts at the GCS, returns to it, and enters at the cell nearest the GCS', async () => {
+    const last = plan.path[plan.path.length - 1];
+    const gcs = { lat: last.lat + 0.0003, lon: last.lon }; // just outside, beside the far end of the path
+    const route = routeWithGcs(plan, gcs);
+    expect(route.path).toHaveLength(plan.path.length + 2);
+    expect(route.path[0]).toEqual(gcs);
+    expect(route.path[route.path.length - 1]).toEqual(gcs);
+    expect(route.kinds[0]).toBe('gcs');
+    expect(route.kinds[route.kinds.length - 1]).toBe('gcs');
+    expect(route.path[1]).toEqual(last); // reversed so the robot enters nearest the GCS
+
+    const gridIds = new Map(cells.map((c) => [c.id, `grid-${c.id}`]));
+    const wps = planWaypoints(route, cells, gridIds);
+    expect(wps[0]).toMatchObject({ seq: 1, type: 'gcs', grid_id: null });
+    expect(wps[wps.length - 1]).toMatchObject({ seq: wps.length, type: 'gcs', grid_id: null });
+    const file = await buildWaypointsFile({ missionId: 'm', deviceId: 'BOT001', supabaseLakeId: 'l', lakeName: 'Test', cellSizeM: 40, gcs, waypoints: wps });
+    expect(file.gcs).toEqual({ lat: wps[0].lat, lon: wps[0].lon }); // header GCS is exactly the first waypoint
+    expect(file.count).toBe(plan.path.length + 2);
+  });
+
+  it('leaves the path unchanged when no GCS is set', () => {
+    expect(routeWithGcs(plan, null)).toEqual({ path: plan.path, kinds: plan.kinds });
   });
 });

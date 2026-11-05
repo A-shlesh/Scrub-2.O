@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ChevronRight, Download, OctagonX, Pause, Play, Send, Square, Waypoints } from 'lucide-react';
+import { ChevronRight, Crosshair, Download, House, LocateFixed, OctagonX, Pause, Play, Send, Square, Waypoints, X } from 'lucide-react';
 import { Navbar } from '../components/Navbar';
 import { ObservatoryMap } from '../components/ObservatoryMap';
 import { PageHeader } from '../components/PageHeader';
@@ -9,7 +9,9 @@ import { useTelemetry } from '../stores/telemetry';
 import { DEMO } from '../demo/demo';
 import { planCoverage } from '../utils/geo';
 import { downloadText, planFileName, planToCsv, planToGeoJson } from '../utils/exportPlan';
-import { buildWaypointsFile, canonicalWaypointText, cellIdsForPath, planWaypoints } from '../utils/waypoints';
+import { buildWaypointsFile, canonicalWaypointText, cellIdsForPath, planWaypoints, routeWithGcs } from '../utils/waypoints';
+import { loadGcs, saveGcs } from '../services/storage/lakeStorage';
+import type { LatLon } from '../types';
 import { fmtMissionState } from '../utils/format';
 import { abandonMission, createMission, fetchMissionProgress, pushLakeAndGrids } from '../services/supabase/supabaseService';
 import type { MissionProgress } from '../services/supabase/supabaseService';
@@ -44,6 +46,21 @@ export function MissionPage() {
   const [lastAckState, setLastAckState] = useState<string | null>(null);
   const [progress, setProgress] = useState<MissionProgress>(NO_PROGRESS);
   const [progressKey, setProgressKey] = useState(0);
+  const [gcs, setGcs] = useState<LatLon | null>(null);
+  const [placingGcs, setPlacingGcs] = useState(false);
+
+  // The GCS is saved per lake; a sample polygon falls back to its parent lake's GCS.
+  useEffect(() => {
+    setPlacingGcs(false);
+    setGcs(lake ? loadGcs(lake.id) ?? (lake.parentLakeId ? loadGcs(lake.parentLakeId) : null) : null);
+  }, [lake?.id, lake?.parentLakeId]);
+
+  const changeGcs = (p: LatLon | null) => {
+    if (!lake) return;
+    saveGcs(lake.id, p);
+    setGcs(p ?? (lake.parentLakeId ? loadGcs(lake.parentLakeId) : null));
+    setPlacingGcs(false);
+  };
 
   // Poll mission progress every 8 seconds while a lake is selected.
   useEffect(() => {
@@ -70,8 +87,12 @@ export function MissionPage() {
   const path = plan.path;
   const blockedLegs = plan.blocked.length;
   const hasPlan = path.length > 0;
+  /** Full route: GCS -> coverage path -> GCS. */
+  const route = useMemo(() => routeWithGcs(plan, gcs), [plan, gcs]);
+  /** Coverage part of the route (in the direction the robot drives it), for the map. */
+  const mapPath = useMemo(() => (gcs && route.path.length > 2 ? route.path.slice(1, -1) : path), [gcs, route, path]);
   /** Identifies the route on screen; a loaded plan only counts while the route is unchanged. */
-  const planSig = useMemo(() => canonicalWaypointText(planWaypoints(plan, cells, new Map())), [plan, cells]);
+  const planSig = useMemo(() => canonicalWaypointText(planWaypoints(route, cells, new Map())), [route, cells]);
 
   const lat = telemetry?.gps.latitude ?? null;
   const lon = telemetry?.gps.longitude ?? null;
@@ -105,6 +126,10 @@ export function MissionPage() {
       setNotice({ tone: 'error', text: 'Select a lake with a grid before sending a plan.' });
       return;
     }
+    if (!gcs) {
+      setNotice({ tone: 'error', text: 'Set the GCS (start and return point) before sending the plan.' });
+      return;
+    }
     const sentSig = planSig;
     setNotice(null);
     setLoaded(null);
@@ -115,7 +140,7 @@ export function MissionPage() {
       setBusy('Saving the plan to Supabase…');
       const { lakeId, gridIds } = await pushLakeAndGrids(lake, cells, cellSizeM);
       // Visit order for mission_grids: lane cells in path order, then any cell not on the path.
-      const pathCells = cellIdsForPath(path, cells).filter((id, i): id is string => id !== null && plan.kinds[i] === 'lane');
+      const pathCells = cellIdsForPath(route.path, cells).filter((id, i): id is string => id !== null && route.kinds[i] === 'lane');
       newMissionId = await createMission(lake.id, lakeId, gridIds, pathCells, ROBOT_ID);
       setProgressKey((k) => k + 1);
 
@@ -125,7 +150,8 @@ export function MissionPage() {
         supabaseLakeId: lakeId,
         lakeName: lake.name ?? null,
         cellSizeM,
-        waypoints: planWaypoints(plan, cells, gridIds),
+        gcs,
+        waypoints: planWaypoints(route, cells, gridIds),
       });
 
       setBusy(`Sent ${file.count} waypoints. Waiting for the robot to confirm…`);
@@ -195,6 +221,9 @@ export function MissionPage() {
     }
   };
 
+  /** The GCS cannot move while the robot is running a mission. */
+  const gcsLocked = (started && !finished) || busy !== null;
+
   const liveWaypoint = liveForMission && typeof liveForMission.currentWaypoint === 'number' ? liveForMission.currentWaypoint : null;
   const liveTotal = liveForMission?.waypointTotal ?? loadedHere?.count ?? null;
   const pct = (done: number, total: number) => `${total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0}%`;
@@ -214,7 +243,8 @@ export function MissionPage() {
             <p className="panel-sub">{lake ? `${lake.name ?? 'Unnamed lake'} · ${cellSizeM} m grid · robot ${ROBOT_ID}` : 'No lake selected'}</p>
 
             <dl className="kv-rows">
-              <div><dt><Waypoints size={18} />Waypoints</dt><dd>{hasPlan ? path.length : '—'}</dd></div>
+              <div><dt><Waypoints size={18} />Waypoints</dt><dd>{hasPlan ? route.path.length : '—'}</dd></div>
+              <div><dt><House size={18} />GCS</dt><dd>{gcs ? 'Set' : 'Not set'}</dd></div>
               <div><dt>Robot</dt><dd>{robotState ? fmtMissionState(robotState) : live ? 'Online' : 'No live data'}</dd></div>
             </dl>
 
@@ -236,6 +266,33 @@ export function MissionPage() {
                 </div>
                 <div className="mission-progress-bar"><div className="mission-progress-fill" style={{ width: pct(progress.done, progress.total) }} /></div>
               </div>
+            )}
+
+            {lake && (
+              <>
+                {gcs && <p className="gcs-coords">GCS {gcs.lat.toFixed(6)}, {gcs.lon.toFixed(6)} · robot starts here and returns here</p>}
+                <div className="gcs-row" role="group" aria-label="Ground control station">
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => setPlacingGcs((v) => !v)}
+                    disabled={gcsLocked}
+                    aria-pressed={placingGcs}
+                  >
+                    <Crosshair size={15} /> {placingGcs ? 'Click the map…' : gcs ? 'Move GCS' : 'Set GCS on map'}
+                  </button>
+                  {robot && (
+                    <button type="button" className="btn" onClick={() => changeGcs(robot)} disabled={gcsLocked} title="Use the robot's current GPS position">
+                      <LocateFixed size={15} /> Robot here
+                    </button>
+                  )}
+                  {gcs && loadGcs(lake.id) && (
+                    <button type="button" className="btn" onClick={() => changeGcs(null)} disabled={gcsLocked} aria-label="Clear GCS" title="Clear GCS">
+                      <X size={15} />
+                    </button>
+                  )}
+                </div>
+              </>
             )}
 
             {loadedHere && !loadedValid && !started && (
@@ -315,7 +372,10 @@ export function MissionPage() {
               style="light"
               gridCells={cells}
               showGrid={false}
-              plannedPath={path}
+              plannedPath={mapPath}
+              gcs={gcs}
+              addLakeMode={placingGcs}
+              onPickPoint={placingGcs ? (p) => changeGcs(p) : undefined}
               detours={plan.detours}
               blockedLegs={plan.blocked}
               robot={robot}
@@ -325,7 +385,10 @@ export function MissionPage() {
             {!lake && (
               <div className="map-hint"><span>Select a lake in the Observatory to plan a mission.</span></div>
             )}
-            {lake && !hasPlan && (
+            {placingGcs && (
+              <div className="map-hint"><span>Click the map where the robot is launched. It starts here and returns here after the last waypoint.</span></div>
+            )}
+            {lake && !hasPlan && !placingGcs && (
               <div className="map-hint">
                 <span>
                   {gridTooFine

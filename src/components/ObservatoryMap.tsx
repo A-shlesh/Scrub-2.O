@@ -84,6 +84,7 @@ export function ObservatoryMap({
   addLakeMode = false,
   heatmapCells = [],
   visitedGridIds = new Set(),
+  gcs = null,
 }: {
   mode?: MapMode;
   style: MapStyle;
@@ -127,6 +128,8 @@ export function ObservatoryMap({
   heatmapCells?: Array<{ gridCode: string; color: string; value: number | null }>;
   /** grid cell IDs that have been visited (completed session) */
   visitedGridIds?: Set<string>;
+  /** ground control station: the robot leaves from here and returns here after the path */
+  gcs?: LatLon | null;
 }) {
   const { lake } = useLake();
   const { theme } = useTheme();
@@ -461,12 +464,27 @@ export function ObservatoryMap({
           .addTo(group)
           .bindTooltip('Blocked: crosses land');
       }
-      L.marker(toLeaflet(plannedPath[0]), {
-        interactive: false,
-        icon: L.divIcon({ className: 'base-marker', html: '<span>A</span>', iconSize: [24, 24], iconAnchor: [12, 12] }),
+      if (!gcs) {
+        L.marker(toLeaflet(plannedPath[0]), {
+          interactive: false,
+          icon: L.divIcon({ className: 'base-marker', html: '<span>A</span>', iconSize: [24, 24], iconAnchor: [12, 12] }),
+        })
+          .addTo(group)
+          .bindTooltip('Base — path start');
+      }
+    }
+
+    if (gcs) {
+      if (plannedPath.length > 0) {
+        const legStyle = { color: '#2f7bf6', weight: 3, dashArray: '8 6', opacity: 0.95, interactive: false };
+        L.polyline([toLeaflet(gcs), toLeaflet(plannedPath[0])], legStyle).addTo(group).bindTooltip('From GCS to the first waypoint');
+        L.polyline([toLeaflet(plannedPath[plannedPath.length - 1]), toLeaflet(gcs)], legStyle).addTo(group).bindTooltip('Return to GCS');
+      }
+      L.marker(toLeaflet(gcs), {
+        icon: L.divIcon({ className: 'base-marker gcs-marker', html: '<span>GCS</span>', iconSize: [34, 34], iconAnchor: [17, 17] }),
       })
         .addTo(group)
-        .bindTooltip('Base — path start');
+        .bindTooltip('GCS — start and return point');
     }
 
     if (editing) {
@@ -525,7 +543,7 @@ export function ObservatoryMap({
         .bindTooltip('Robot — live GPS');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lake, workingPoints, workingHoles, mode, gridCells, showGrid, robot, plannedPath, style, previewPoints, previewHoles, referencePoints, otherLakes, detours, blockedLegs, heatmapCells, visitedGridIds]);
+  }, [lake, workingPoints, workingHoles, mode, gridCells, showGrid, robot, plannedPath, style, previewPoints, previewHoles, referencePoints, otherLakes, detours, blockedLegs, heatmapCells, visitedGridIds, gcs]);
 
   return (
     <>
@@ -536,10 +554,11 @@ export function ObservatoryMap({
       ) : null}
       {showLegend ? (
         <div className="map-legend" aria-label="Map legend">
-          <span><i className="lg-dot" style={{ background: '#2f7bf6' }} /> Base</span>
+          <span><i className="lg-dot" style={{ background: '#2f7bf6' }} /> {gcs ? 'GCS (start / return)' : 'Base'}</span>
           <span><i className="lg-dot" style={style === 'light' ? { background: '#0f5c33', boxShadow: '0 0 0 2px #fff' } : { background: '#fff' }} /> Waypoint</span>
           <span><i className="lg-line" style={style === 'light' ? { background: '#0f5c33', boxShadow: '0 0 0 1.5px #fff' } : undefined} /> Planned Path</span>
           <span><i className="lg-ring" /> Current Position</span>
+          {gcs && plannedPath.length > 0 ? <span><i className="lg-line" style={{ background: 'repeating-linear-gradient(90deg, #2f7bf6 0 6px, transparent 6px 10px)', height: 3 }} /> To / from GCS</span> : null}
           {detours.length > 0 ? <span><i className="lg-line" style={{ background: '#f59e0b', height: 3 }} /> Detour around land</span> : null}
           {blockedLegs.length > 0 ? <span><i className="lg-line" style={{ background: '#ef4444', height: 3 }} /> Blocked leg</span> : null}
         </div>

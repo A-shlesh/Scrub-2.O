@@ -1,4 +1,4 @@
-import type { GridConfiguration, Lake } from '../../types';
+import type { GridConfiguration, Lake, LatLon } from '../../types';
 
 export interface GridSnapshot {
   lakeId: string;
@@ -17,6 +17,7 @@ const DELETED_DEMOS_KEY = 'scrub:deletedDemos';
 const DELETED_IDS_KEY = 'scrub:deletedIds';
 const SUPABASE_LAKE_IDS_KEY = 'scrub:supabaseLakeIds';
 const MISSION_IDS_KEY = 'scrub:missionIds';
+const GCS_KEY = 'scrub:gcs';
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -64,6 +65,19 @@ export function rememberMissionId(lakeId: string, missionId: string): void {
   const all = readJson<Record<string, string>>(MISSION_IDS_KEY, {});
   all[lakeId] = missionId;
   writeJson(MISSION_IDS_KEY, all);
+}
+
+/** Ground control station of a lake (where the robot starts and returns), or null. */
+export function loadGcs(lakeId: string): LatLon | null {
+  const p = readJson<Record<string, LatLon>>(GCS_KEY, {})[lakeId];
+  return p && Number.isFinite(p.lat) && Number.isFinite(p.lon) ? { lat: p.lat, lon: p.lon } : null;
+}
+
+export function saveGcs(lakeId: string, gcs: LatLon | null): void {
+  const all = readJson<Record<string, LatLon>>(GCS_KEY, {});
+  if (gcs) all[lakeId] = { lat: gcs.lat, lon: gcs.lon };
+  else delete all[lakeId];
+  writeJson(GCS_KEY, all);
 }
 
 export function loadMissionId(lakeId: string): string | null {
