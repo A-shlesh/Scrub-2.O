@@ -54,9 +54,27 @@ export type MissionState =
   | 'returning'
   | 'paused'
   | 'completed'
+  | 'aborted'
   | 'emergency_stop'
   | 'error'
   | 'unknown';
+
+/** Motor commands as reported by the STM32 (`motors.left` / `motors.right`), e.g. -100..+100. */
+export interface MotorReading {
+  left: number | null;
+  right: number | null;
+}
+
+/** Navigation state computed by the Raspberry Pi while it follows the waypoints. */
+export interface NavigationInfo {
+  /** waypoint the robot is heading to */
+  target: LatLon | null;
+  distanceToTargetM: number | null;
+  /** waypoints reached so far */
+  completedWaypoints: number | null;
+  /** 0..1 */
+  progress: number | null;
+}
 
 export interface Telemetry {
   robotId: string;
@@ -73,6 +91,8 @@ export interface Telemetry {
   currentWaypoint: string | number | null;
   /** number of waypoints in the loaded plan, when the robot reports it */
   waypointTotal?: number | null;
+  motors?: MotorReading;
+  navigation?: NavigationInfo;
 }
 
 // ---------------------------------------------------------------------------
@@ -221,8 +241,12 @@ export interface GridSession {
 
 export interface SensorSample {
   sample_id: string;
-  session_id: string;
-  grid_id: string;
+  /** grid-era rows only; null for records taken while following the polygon route */
+  session_id: string | null;
+  grid_id: string | null;
+  device_id?: string | null;
+  mission_id?: string | null;
+  heading_deg?: number | null;
   sample_number: number;
   recorded_at: string;
   latitude: number;

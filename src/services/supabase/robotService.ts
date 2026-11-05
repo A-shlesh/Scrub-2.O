@@ -1,6 +1,6 @@
 /**
  * Commands to the robot through Supabase (`robot_commands`), each acknowledged by the robot.
- * Protocol: docs/robot-protocol.md.
+ * Used when no Pi backend URL is set (see services/robot/robotLink.ts). Protocol: docs/robot-protocol.md.
  */
 import { supabase, supabaseConfigured } from './supabaseClient';
 
@@ -124,13 +124,4 @@ export function waitForAck(commandId: string, timeoutMs: number): Promise<Comman
 export async function command(cmd: RobotCommand, missionId: string | null, payload: unknown = null): Promise<CommandRow> {
   const id = await sendCommand(cmd, missionId, payload);
   return waitForAck(id, ACK_TIMEOUT_MS[cmd]);
-}
-
-/** One-line description of the robot's answer, for the UI. */
-export function describeAnswer(cmd: RobotCommand, row: CommandRow): string {
-  const name = cmd === 'RETURN_HOME' ? 'return to GCS' : cmd.replace('_', ' ').toLowerCase();
-  if (row.status === 'ACKED') return `Robot confirmed ${name}.`;
-  if (row.status === 'REJECTED') return `Robot refused ${name}${row.detail ? `: ${row.detail}` : '.'}`;
-  if (row.status === 'EXPIRED') return `No answer from the robot for ${name}. The command was cancelled, so the robot will not act on it.`;
-  return `Waiting for the robot (${name})…`;
 }

@@ -13,16 +13,17 @@ const robot = (over: Partial<Telemetry> = {}): Telemetry => ({
 } as Telemetry);
 
 describe('mission estimate', () => {
-  it('counts driving time and sampling stops (defaults: 0.8 m/s, 10 s per cell, 120 min battery, 20% reserve)', () => {
-    const e = estimateMission(4800, 60); // 6000 s driving + 600 s sampling = 110 min
-    expect(Math.round(e.minutes)).toBe(110);
-    expect(e.batteryNeededPct).toBe(100); // 92% of the battery + 20% reserve, capped at 100
-    expect(fmtMinutes(e.minutes)).toBe('1 h 50 min');
+  it('counts driving time (defaults: 0.8 m/s, 120 min battery, 20% reserve)', () => {
+    const e = estimateMission(4800); // 6000 s driving = 100 min
+    expect(Math.round(e.minutes)).toBe(100);
+    expect(e.batteryNeededPct).toBe(100); // 84% of the battery + 20% reserve, capped at 100
+    expect(fmtMinutes(e.minutes)).toBe('1 h 40 min');
+    expect(estimateMission(2400).batteryNeededPct).toBe(62); // 42% + 20%
   });
 });
 
 describe('start checks', () => {
-  const small = estimateMission(480, 10);
+  const small = estimateMission(480);
   it('is ready with live data, a GPS fix and enough battery', () => {
     expect(startProblems(robot(), true, small)).toEqual([]);
   });
@@ -33,7 +34,7 @@ describe('start checks', () => {
   it('flags no GPS fix and a low or insufficient battery', () => {
     expect(startProblems(robot({ gps: { latitude: null, longitude: null, speedMps: null, fix: false, satellites: 0 } }), true, small).join()).toMatch(/GPS/);
     expect(startProblems(robot({ batteryPercent: 25 }), true, small).join()).toMatch(/at least 30%/);
-    expect(startProblems(robot({ batteryPercent: 40 }), true, estimateMission(4800, 60)).join()).toMatch(/needs about/);
+    expect(startProblems(robot({ batteryPercent: 40 }), true, estimateMission(4800)).join()).toMatch(/needs about/);
     expect(startProblems(robot({ batteryPercent: null }), true, small).join()).toMatch(/battery level/);
   });
 });

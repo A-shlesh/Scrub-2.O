@@ -70,7 +70,7 @@ export function LakeSetupPanel({
 
       <div className="setup-block">
         <div className="setup-head">
-          <h3>Sampling grid</h3>
+          <h3>Analysis grid</h3>
           <span className="tag">{hasBoundary && !gridTooFine ? `${cells.length} cells` : '—'}</span>
         </div>
 
@@ -99,7 +99,7 @@ export function LakeSetupPanel({
           </div>
         ) : hasBoundary ? (
           <p className="setup-meta">
-            Each cell is {cellSizeM} m × {cellSizeM} m; the robot samples its centre.
+            Each cell is {cellSizeM} m × {cellSizeM} m. Used to group stored readings for analysis; the robot follows the polygon route, not the grid.
           </p>
         ) : (
           <p className="setup-meta">

@@ -10,6 +10,14 @@ import { useTheme } from '../stores/theme';
 
 export type MapMode = 'browse' | 'edit' | 'draw';
 
+/** A clickable point on the map, e.g. a stored sensor record. */
+export interface MapPoint {
+  id: string;
+  p: LatLon;
+  color: string;
+  label: string;
+}
+
 /** Where the map opens when no lake is selected. Override with VITE_MAP_CENTER="lat,lon" and VITE_MAP_ZOOM. */
 function startView(): { center: [number, number]; zoom: number } {
   const raw = import.meta.env.VITE_MAP_CENTER;
@@ -33,6 +41,9 @@ const NO_RINGS: LatLon[][] = [];
 const NO_CELLS: GridCell[] = [];
 const NO_LAKES: Array<{ id: string; points: LatLon[] }> = [];
 const NO_LEGS: Array<[LatLon, LatLon]> = [];
+const NO_MAP_POINTS: MapPoint[] = [];
+const RETURN_COLOR = '#9333ea';
+const OUT_COLOR = '#2f7bf6';
 
 function toLeaflet(p: LatLon): [number, number] {
   return [p.lat, p.lon];
@@ -85,6 +96,13 @@ export function ObservatoryMap({
   heatmapCells = [],
   visitedGridIds = new Set(),
   gcs = null,
+  returnLeg = null,
+  seqOffset = 1,
+  trail = NO_POINTS,
+  target = null,
+  points = NO_MAP_POINTS,
+  selectedPointId = null,
+  onPointClick,
 }: {
   mode?: MapMode;
   style: MapStyle;
@@ -130,6 +148,18 @@ export function ObservatoryMap({
   visitedGridIds?: Set<string>;
   /** ground control station: the robot leaves from here and returns here after the path */
   gcs?: LatLon | null;
+  /** last coverage waypoint -> ... -> GCS, drawn in its own colour; default: a straight line */
+  returnLeg?: LatLon[] | null;
+  /** sequence number of plannedPath[0] in the waypoint tooltips (1 when the GCS is waypoint 0) */
+  seqOffset?: number;
+  /** recent GPS positions of the robot */
+  trail?: LatLon[];
+  /** waypoint the robot is heading to */
+  target?: LatLon | null;
+  /** clickable points (fits the map to them when they change) */
+  points?: MapPoint[];
+  selectedPointId?: string | null;
+  onPointClick?: (id: string) => void;
 }) {
   const { lake } = useLake();
   const { theme } = useTheme();
@@ -151,6 +181,8 @@ export function ObservatoryMap({
   const noticeRef = useRef(onNotice);
   noticeRef.current = onNotice;
   const toggleRef = useRef(onToggleExpand);
+  const pointClickRef = useRef(onPointClick);
+  pointClickRef.current = onPointClick;
   const youRef = useRef<L.LayerGroup | null>(null);
   const justDraggedRef = useRef(false);
   const clickTimerRef = useRef<number | null>(null);
@@ -444,20 +476,21 @@ export function ObservatoryMap({
 
     if (plannedPath.length >= 2) {
       L.polyline(plannedPath.map(toLeaflet), { color: ink, weight: 2.5, opacity: 0.9, interactive: false }).addTo(group);
-      for (const pt of plannedPath) {
+      plannedPath.forEach((pt, i) => {
         L.circleMarker(toLeaflet(pt), {
           radius: 3.5,
           color: halo,
           fillColor: ink,
           fillOpacity: 1,
           weight: onImagery ? 1 : 1.5,
-          interactive: false,
-        }).addTo(group);
-      }
+        })
+          .addTo(group)
+          .bindTooltip(`Waypoint ${i + seqOffset}`);
+      });
       for (const d of detours) {
         L.polyline(d.map(toLeaflet), { color: '#f59e0b', weight: 4, opacity: 0.95, interactive: false })
           .addTo(group)
-          .bindTooltip('Detour around land');
+          .bindTooltip('Through the water, around land');
       }
       for (const [a, b] of blockedLegs) {
         L.polyline([toLeaflet(a), toLeaflet(b)], { color: '#ef4444', weight: 3.5, dashArray: '6 6', interactive: false })
@@ -476,9 +509,13 @@ export function ObservatoryMap({
 
     if (gcs) {
       if (plannedPath.length > 0) {
-        const legStyle = { color: '#2f7bf6', weight: 3, dashArray: '8 6', opacity: 0.95, interactive: false };
-        L.polyline([toLeaflet(gcs), toLeaflet(plannedPath[0])], legStyle).addTo(group).bindTooltip('From GCS to the first waypoint');
-        L.polyline([toLeaflet(plannedPath[plannedPath.length - 1]), toLeaflet(gcs)], legStyle).addTo(group).bindTooltip('Return to GCS');
+        L.polyline([toLeaflet(gcs), toLeaflet(plannedPath[0])], { color: OUT_COLOR, weight: 3, dashArray: '8 6', opacity: 0.95 })
+          .addTo(group)
+          .bindTooltip('From GCS to the first waypoint');
+        const back = returnLeg && returnLeg.length >= 2 ? returnLeg : [plannedPath[plannedPath.length - 1], gcs];
+        L.polyline(back.map(toLeaflet), { color: RETURN_COLOR, weight: 3.5, dashArray: '2 7', lineCap: 'round', opacity: 0.95 })
+          .addTo(group)
+          .bindTooltip('Return to GCS');
       }
       L.marker(toLeaflet(gcs), {
         icon: L.divIcon({ className: 'base-marker gcs-marker', html: '<span>GCS</span>', iconSize: [34, 34], iconAnchor: [17, 17] }),
@@ -523,6 +560,31 @@ export function ObservatoryMap({
       });
     }
 
+    for (const pt of points) {
+      const selected = pt.id === selectedPointId;
+      L.circleMarker(toLeaflet(pt.p), {
+        radius: selected ? 8 : 5,
+        color: selected ? '#111827' : '#ffffff',
+        weight: selected ? 3 : 1.5,
+        fillColor: pt.color,
+        fillOpacity: 0.95,
+        bubblingMouseEvents: false,
+      })
+        .addTo(group)
+        .bindTooltip(pt.label)
+        .on('click', () => pointClickRef.current?.(pt.id));
+    }
+
+    if (trail.length >= 2) {
+      L.polyline(trail.map(toLeaflet), { color: '#22c55e', weight: 3, opacity: 0.8, interactive: false }).addTo(group);
+    }
+
+    if (target) {
+      L.circleMarker(toLeaflet(target), { radius: 9, color: '#f97316', weight: 3, fillOpacity: 0 })
+        .addTo(group)
+        .bindTooltip('Current target waypoint');
+    }
+
     if (robot) {
       L.circleMarker(toLeaflet(robot), {
         radius: 15,
@@ -543,7 +605,16 @@ export function ObservatoryMap({
         .bindTooltip('Robot — live GPS');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lake, workingPoints, workingHoles, mode, gridCells, showGrid, robot, plannedPath, style, previewPoints, previewHoles, referencePoints, otherLakes, detours, blockedLegs, heatmapCells, visitedGridIds, gcs]);
+  }, [lake, workingPoints, workingHoles, mode, gridCells, showGrid, robot, plannedPath, style, previewPoints, previewHoles, referencePoints, otherLakes, detours, blockedLegs, heatmapCells, visitedGridIds, gcs, returnLeg, seqOffset, trail, target, points, selectedPointId]);
+
+  // Fit the map to a new set of points (e.g. a loaded sensor history), not to a recolouring of the same set.
+  const pointsKey = points.length === 0 ? '' : `${points.length}|${points[0].id}|${points[points.length - 1].id}`;
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || points.length === 0) return;
+    map.fitBounds(L.latLngBounds(points.map((pt) => toLeaflet(pt.p))), { padding: [40, 40], maxZoom: 18 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pointsKey]);
 
   return (
     <>
@@ -558,8 +629,11 @@ export function ObservatoryMap({
           <span><i className="lg-dot" style={style === 'light' ? { background: '#0f5c33', boxShadow: '0 0 0 2px #fff' } : { background: '#fff' }} /> Waypoint</span>
           <span><i className="lg-line" style={style === 'light' ? { background: '#0f5c33', boxShadow: '0 0 0 1.5px #fff' } : undefined} /> Planned Path</span>
           <span><i className="lg-ring" /> Current Position</span>
-          {gcs && plannedPath.length > 0 ? <span><i className="lg-line" style={{ background: 'repeating-linear-gradient(90deg, #2f7bf6 0 6px, transparent 6px 10px)', height: 3 }} /> To / from GCS</span> : null}
-          {detours.length > 0 ? <span><i className="lg-line" style={{ background: '#f59e0b', height: 3 }} /> Detour around land</span> : null}
+          {gcs && plannedPath.length > 0 ? <span><i className="lg-line" style={{ background: `repeating-linear-gradient(90deg, ${OUT_COLOR} 0 6px, transparent 6px 10px)`, height: 3 }} /> From GCS</span> : null}
+          {gcs && plannedPath.length > 0 ? <span><i className="lg-line" style={{ background: `repeating-linear-gradient(90deg, ${RETURN_COLOR} 0 3px, transparent 3px 7px)`, height: 3 }} /> Return to GCS</span> : null}
+          {detours.length > 0 ? <span><i className="lg-line" style={{ background: '#f59e0b', height: 3 }} /> Around land (in water)</span> : null}
+          {trail.length >= 2 ? <span><i className="lg-line" style={{ background: '#22c55e', height: 3 }} /> Robot track</span> : null}
+          {target ? <span><i className="lg-ring" style={{ borderColor: '#f97316', boxShadow: 'none' }} /> Target waypoint</span> : null}
           {blockedLegs.length > 0 ? <span><i className="lg-line" style={{ background: '#ef4444', height: 3 }} /> Blocked leg</span> : null}
         </div>
       ) : null}

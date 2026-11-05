@@ -1,4 +1,5 @@
 import type { GridCell, GridCellAverage, GridAnalytics, Lake, LatLon, SensorAverage, SensorKey, SensorMeta, SensorSample } from '../../types';
+import type { MissionPayload } from '../../utils/missionPayload';
 import { openRing } from '../../utils/geo';
 import {
   getOrCreateSupabaseLakeId,
@@ -97,128 +98,53 @@ async function fetchGridsBySupabaseLakeId(supaLakeId: string): Promise<SupabaseG
 }
 
 /**
- * Push a lake/polygon and its full grid to Supabase (`lakes` + `grids` tables).
- * A cell whose size and centre already exist for this lake keeps its existing grid_id;
- * every other cell gets a new row. Rows from earlier grid layouts are left untouched,
- * so the samples recorded against them keep their true location.
- * Returns the Supabase lake_id and a map of local cell id → grid_id.
+ * Make sure the lake (or, for a sample polygon, its parent lake) has a `lakes` row and
+ * return its Supabase lake_id. A sample polygon never overwrites its parent's name or outline.
  */
-export async function pushLakeAndGrids(lake: Lake, cells: GridCell[], cellSizeM: number): Promise<{ lakeId: string; gridIds: Map<string, string> }> {
+export async function pushLake(lake: Lake): Promise<string> {
   const sb = client();
   const boundary = lake.scrubBoundary?.points ?? lake.osmBoundary?.points ?? null;
   if (!boundary || boundary.length < 3) throw new Error('This lake has no boundary to send.');
-  if (cells.length === 0) throw new Error('This lake has no grid points to send.');
-
-  // A sample polygon inside a real lake stores its grids under the parent lake,
-  // and must not overwrite the parent's name/boundary.
-  const isChildPolygon = !!lake.parentLakeId;
   const lakeId = getOrCreateSupabaseLakeId(supabaseLakeKey(lake));
-  const now = utcIso();
-
-  if (!isChildPolygon) {
-    const { error: lakeError } = await sb.from('lakes').upsert({
-      lake_id: lakeId,
-      name: lake.name ?? 'Unnamed',
-      boundary: polygonEwkt(boundary),
-      created_at: now,
-    });
-    if (lakeError) throw new Error(`Could not save lake: ${lakeError.message}`);
-  }
-
-  let existing: SupabaseGrid[];
-  try {
-    existing = await fetchGridsBySupabaseLakeId(lakeId);
-  } catch (e) {
-    throw new Error(`Could not read existing grid points: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  const byGeometry = new Map(existing.map((g) => [gridGeometryKey(g.gridSizeM, g.centerLat, g.centerLon), g.gridId]));
-
-  const gridIds = new Map<string, string>();
-  const updates: Record<string, unknown>[] = [];
-  const inserts: Record<string, unknown>[] = [];
-  for (const c of cells) {
-    const known = byGeometry.get(gridGeometryKey(cellSizeM, c.center.lat, c.center.lon));
-    const row = {
-      grid_id: known ?? crypto.randomUUID(),
-      lake_id: lakeId,
-      grid_code: c.id,
-      grid_size_m: cellSizeM,
-      center_lat: c.center.lat,
-      center_lon: c.center.lon,
-      center_geom: pointEwkt(c.center),
-    };
-    gridIds.set(c.id, row.grid_id);
-    if (known) updates.push(row); // keeps its original created_at
-    else inserts.push({ ...row, created_at: now });
-  }
-
-  for (const [i, batch] of chunks(updates, WRITE_CHUNK).entries()) {
-    const { error } = await sb.from('grids').upsert(batch);
-    if (error) throw new Error(`Could not update grid points (batch ${i + 1}): ${error.message}`);
-  }
-  for (const [i, batch] of chunks(inserts, WRITE_CHUNK).entries()) {
-    const { error } = await sb.from('grids').insert(batch);
-    if (error) throw new Error(`Could not save grid points (batch ${i + 1}): ${error.message}`);
-  }
-
-  return { lakeId, gridIds };
+  const row = { lake_id: lakeId, name: lake.name ?? 'Unnamed', boundary: polygonEwkt(boundary), created_at: utcIso() };
+  const { error } = lake.parentLakeId
+    ? await sb.from('lakes').upsert(row, { onConflict: 'lake_id', ignoreDuplicates: true })
+    : await sb.from('lakes').upsert(row);
+  if (error) throw new Error(`Could not save lake: ${error.message}`);
+  return lakeId;
 }
 
 /**
- * Create a mission with one mission_grids row per cell, in `orderedCellIds` order
- * (cells missing from it are appended). Call AFTER pushLakeAndGrids.
- * If any mission_grids batch fails, the mission and its rows are removed again.
- * `localLakeId` is the SCRUB lake id (lake or sample polygon) the mission is remembered under.
+ * Create the mission row (status PENDING) before the plan is sent to the robot, and keep
+ * the plan with it (polygon, GCS, waypoint count, full payload) for the mission history.
+ * The plan columns come from the polygon-navigation migration; without them only the
+ * basic row is stored. `localLakeId` is the SCRUB lake the mission is remembered under.
  */
-export async function createMission(
-  localLakeId: string,
-  supabaseLakeId: string,
-  cellToGridId: Map<string, string>,
-  orderedCellIds: string[],
-  deviceId = 'BOT001',
-): Promise<string> {
+export async function createMission(localLakeId: string, supabaseLakeId: string, payload: MissionPayload): Promise<void> {
   const sb = client();
-  const missionId = crypto.randomUUID();
-
-  const { error: mErr } = await sb.from('missions').insert({
-    mission_id: missionId,
-    device_id: deviceId,
+  const { error } = await sb.from('missions').insert({
+    mission_id: payload.mission_id,
+    device_id: payload.device_id,
     lake_id: supabaseLakeId,
     status: 'PENDING',
-    created_at: utcIso(),
+    created_at: payload.created_at,
     notes: null,
   });
-  if (mErr) throw new Error(`Could not create mission: ${mErr.message}`);
-
-  const seen = new Set<string>();
-  const ordered: string[] = [];
-  for (const id of [...orderedCellIds, ...cellToGridId.keys()]) {
-    const gid = cellToGridId.get(id);
-    if (gid && !seen.has(id)) {
-      seen.add(id);
-      ordered.push(gid);
-    }
-  }
-  const rows = ordered.map((gridId, i) => ({
-    mission_grid_id: crypto.randomUUID(),
-    mission_id: missionId,
-    grid_id: gridId,
-    sequence_order: i + 1,
-    status: 'PENDING',
-    session_id: null,
-  }));
-
-  for (const [i, batch] of chunks(rows, WRITE_CHUNK).entries()) {
-    const { error } = await sb.from('mission_grids').insert(batch);
-    if (error) {
-      // Best-effort rollback so a half-built mission is never left PENDING.
-      await sb.from('mission_grids').delete().eq('mission_id', missionId);
-      await sb.from('missions').delete().eq('mission_id', missionId);
-      throw new Error(`Could not create mission grid rows (batch ${i + 1}): ${error.message}`);
-    }
-  }
-  rememberMissionId(localLakeId, missionId);
-  return missionId;
+  if (error) throw new Error(`Could not create mission: ${error.message}`);
+  rememberMissionId(localLakeId, payload.mission_id);
+  // Best effort: older schemas lack these columns.
+  await sb
+    .from('missions')
+    .update({
+      gcs_lat: payload.ground_control.latitude,
+      gcs_lon: payload.ground_control.longitude,
+      polygon: polygonEwkt(payload.polygon.map((p) => ({ lat: p.latitude, lon: p.longitude }))),
+      sweep_spacing_m: payload.sweep_spacing_m,
+      waypoint_count: payload.waypoint_count,
+      waypoint_checksum: payload.checksum,
+      plan: payload,
+    })
+    .eq('mission_id', payload.mission_id);
 }
 
 /** Mark a mission ABORTED (e.g. the robot never loaded its waypoints). Best effort: errors are ignored. */
@@ -227,54 +153,117 @@ export async function abandonMission(missionId: string, reason: string): Promise
   await supabase.from('missions').update({ status: 'ABORTED', notes: reason }).eq('mission_id', missionId).eq('status', 'PENDING');
 }
 
-export interface MissionProgress {
+export interface LatestMission {
   missionId: string | null;
-  done: number;
-  total: number;
+  /** missions.status as kept by the robot: PENDING, ACTIVE, PAUSED, COMPLETED, ABORTED */
   status: string | null;
 }
 
 /**
- * Progress of the mission created for this lake from this browser or, for a real lake
- * with none remembered, the lake's latest mission. A sample polygon only ever shows its
- * own mission, never one from its parent lake or a sibling polygon.
+ * The mission created for this lake from this browser or, for a real lake with none
+ * remembered, the lake's latest mission. A sample polygon only ever shows its own mission.
  */
-export async function fetchMissionProgress(lake: Lake): Promise<MissionProgress> {
-  const EMPTY: MissionProgress = { missionId: null, done: 0, total: 0, status: null };
+export async function fetchLatestMission(lake: Lake): Promise<LatestMission> {
+  const EMPTY: LatestMission = { missionId: null, status: null };
   if (!supabaseConfigured || !supabase) return EMPTY;
   const sb = supabase;
-
-  let missionId = loadMissionId(lake.id);
-  let status: string | null = null;
-  if (missionId) {
-    const { data, error } = await sb.from('missions').select('status').eq('mission_id', missionId).maybeSingle();
+  const remembered = loadMissionId(lake.id);
+  if (remembered) {
+    const { data, error } = await sb.from('missions').select('status').eq('mission_id', remembered).maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) return EMPTY; // deleted on the server
-    status = (data as { status: string }).status;
-  } else {
-    if (lake.parentLakeId) return EMPTY;
-    const supaLakeId = getSupabaseLakeId(lake.id);
-    if (!supaLakeId) return EMPTY;
-    const { data, error } = await sb
-      .from('missions')
-      .select('mission_id, status')
-      .eq('lake_id', supaLakeId)
-      .order('created_at', { ascending: false })
-      .limit(1);
-    if (error) throw new Error(error.message);
-    if (!data || data.length === 0) return EMPTY;
-    const m = data[0] as { mission_id: string; status: string };
-    missionId = m.mission_id;
-    status = m.status;
+    return data ? { missionId: remembered, status: (data as { status: string }).status } : EMPTY;
   }
+  if (lake.parentLakeId) return EMPTY;
+  const supaLakeId = getSupabaseLakeId(lake.id);
+  if (!supaLakeId) return EMPTY;
+  const { data, error } = await sb
+    .from('missions')
+    .select('mission_id, status')
+    .eq('lake_id', supaLakeId)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (error) throw new Error(error.message);
+  if (!data || data.length === 0) return EMPTY;
+  const m = data[0] as { mission_id: string; status: string };
+  return { missionId: m.mission_id, status: m.status };
+}
 
-  const [all, completed] = await Promise.all([
-    sb.from('mission_grids').select('mission_grid_id', { count: 'exact', head: true }).eq('mission_id', missionId),
-    sb.from('mission_grids').select('mission_grid_id', { count: 'exact', head: true }).eq('mission_id', missionId).eq('status', 'COMPLETED'),
-  ]);
-  if (all.error) throw new Error(all.error.message);
-  if (completed.error) throw new Error(completed.error.message);
-  return { missionId, done: completed.count ?? 0, total: all.count ?? 0, status };
+export interface MissionListItem {
+  missionId: string;
+  status: string;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  lakeName: string | null;
+}
+
+/** The robot's most recent missions, newest first (for the sensor history filter). */
+export async function fetchMissions(deviceId: string, limit = 100): Promise<MissionListItem[]> {
+  const sb = client();
+  const { data, error } = await sb
+    .from('missions')
+    .select('mission_id, status, created_at, started_at, completed_at, lake_id')
+    .eq('device_id', deviceId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(error.message);
+  const rows = (data ?? []) as Array<{
+    mission_id: string;
+    status: string;
+    created_at: string;
+    started_at: string | null;
+    completed_at: string | null;
+    lake_id: string | null;
+  }>;
+  const lakeIds = [...new Set(rows.map((r) => r.lake_id).filter((id): id is string => !!id))];
+  const names = new Map<string, string>();
+  if (lakeIds.length > 0) {
+    const { data: lakes } = await sb.from('lakes').select('lake_id, name').in('lake_id', lakeIds);
+    for (const l of (lakes ?? []) as Array<{ lake_id: string; name: string | null }>) if (l.name) names.set(l.lake_id, l.name);
+  }
+  return rows.map((r) => ({
+    missionId: r.mission_id,
+    status: r.status,
+    createdAt: r.created_at,
+    startedAt: r.started_at,
+    completedAt: r.completed_at,
+    lakeName: r.lake_id ? names.get(r.lake_id) ?? null : null,
+  }));
+}
+
+/** Most sensor records one history query returns. */
+export const HISTORY_MAX_ROWS = 5000;
+
+/**
+ * GPS-tagged sensor records (one every 10 s) for a robot, optionally for one mission,
+ * within [fromMs, toMs], oldest first. `truncated` is true when more rows exist.
+ */
+export async function fetchSensorHistory(q: {
+  deviceId: string;
+  missionId?: string | null;
+  fromMs: number;
+  toMs: number;
+}): Promise<{ samples: SensorSample[]; truncated: boolean }> {
+  const sb = client();
+  const out: SensorSample[] = [];
+  for (let from = 0; from < HISTORY_MAX_ROWS; from += PAGE) {
+    let query = sb
+      .from('sensor_samples')
+      .select('*')
+      .eq('device_id', q.deviceId)
+      .gte('recorded_at', utcIso(q.fromMs))
+      .lte('recorded_at', utcIso(q.toMs));
+    if (q.missionId) query = query.eq('mission_id', q.missionId);
+    const { data, error } = await query
+      .order('recorded_at', { ascending: true })
+      .order('sample_id')
+      .range(from, Math.min(from + PAGE, HISTORY_MAX_ROWS) - 1);
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as SensorSample[];
+    out.push(...rows);
+    if (rows.length < PAGE) return { samples: out, truncated: false };
+  }
+  return { samples: out, truncated: true };
 }
 
 /**
@@ -414,6 +403,7 @@ export function computeGridAnalytics(
 ): GridAnalytics {
   const byGrid = new Map<string, SensorSample[]>();
   for (const s of samples) {
+    if (!s.grid_id) continue; // records taken along the polygon route carry no grid
     const arr = byGrid.get(s.grid_id) ?? [];
     arr.push(s);
     byGrid.set(s.grid_id, arr);
@@ -463,13 +453,3 @@ export async function saveGcsRemote(lake: Lake, gcs: LatLon | null): Promise<boo
     .select('lake_id');
   return !error && Array.isArray(data) && data.length > 0;
 }
-
-/** grid_ids of the mission's cells the robot has finished sampling. */
-export async function fetchCompletedMissionGrids(missionId: string): Promise<Set<string>> {
-  const sb = client();
-  const rows = await selectAll<{ grid_id: string }>((from, to) =>
-    sb.from('mission_grids').select('grid_id').eq('mission_id', missionId).eq('status', 'COMPLETED').order('grid_id').range(from, to),
-  );
-  return new Set(rows.map((r) => r.grid_id));
-}
-

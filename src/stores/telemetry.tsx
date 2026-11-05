@@ -1,17 +1,23 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { ConnectionState, Telemetry } from '../types';
+import type { ConnectionState, LatLon, Telemetry } from '../types';
 import { NullRealtimeService, staleAfterMs } from '../services/realtime/realtimeService';
 import type { RealtimeService } from '../services/realtime/realtimeService';
 import { DEMO, DemoRealtimeService } from '../demo/demo';
 import { SupabaseRealtimeService } from '../services/realtime/supabaseRealtimeService';
 import { supabaseConfigured } from '../services/supabase/supabaseClient';
+import { WebSocketRealtimeService } from '../services/realtime/wsRealtimeService';
+import { wsConfigured } from '../config/backend';
 
 interface TelemetryCtx {
   telemetry: Telemetry | null;
   connection: ConnectionState;
   /** true when connected AND a fresh packet arrived within the stale window */
   live: boolean;
+  /** recent GPS positions of the robot (this session, oldest first) */
+  trail: LatLon[];
+  /** where live telemetry comes from */
+  source: 'pi' | 'supabase' | 'demo' | 'none';
   reconnect: () => void;
 }
 
@@ -19,25 +25,45 @@ const Ctx = createContext<TelemetryCtx>({
   telemetry: null,
   connection: { status: 'disconnected', lastMessageAt: null, detail: null },
   live: false,
+  trail: [],
+  source: 'none',
   reconnect: () => undefined,
 });
 
-// Single shared instance: live telemetry over Supabase Realtime when Supabase is configured.
-// VITE_DEMO=1 swaps in synthetic telemetry for design review only.
-const service: RealtimeService = DEMO
-  ? new DemoRealtimeService()
-  : supabaseConfigured
-    ? new SupabaseRealtimeService()
-    : new NullRealtimeService();
+/** Positions kept for the live track on the maps. */
+const TRAIL_MAX = 600;
+
+// Single shared instance: the Pi's WebSocket when VITE_WS_BASE_URL / VITE_API_BASE_URL is set,
+// else Supabase Realtime. VITE_DEMO=1 swaps in synthetic telemetry for design review only.
+const source: TelemetryCtx['source'] = DEMO ? 'demo' : wsConfigured ? 'pi' : supabaseConfigured ? 'supabase' : 'none';
+const service: RealtimeService =
+  source === 'demo'
+    ? new DemoRealtimeService()
+    : source === 'pi'
+      ? new WebSocketRealtimeService()
+      : source === 'supabase'
+        ? new SupabaseRealtimeService()
+        : new NullRealtimeService();
 
 export function TelemetryProvider({ children }: { children: ReactNode }) {
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null);
+  const [trail, setTrail] = useState<LatLon[]>([]);
   const [connection, setConnection] = useState<ConnectionState>(() => service.getConnection());
   const [now, setNow] = useState(() => Date.now());
   const timer = useRef<number | null>(null);
 
   useEffect(() => {
-    const offT = service.onTelemetry(setTelemetry);
+    const offT = service.onTelemetry((t) => {
+      setTelemetry(t);
+      const { latitude: lat, longitude: lon } = t.gps;
+      if (lat === null || lon === null) return;
+      setTrail((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && last.lat === lat && last.lon === lon) return prev;
+        const next = [...prev, { lat, lon }];
+        return next.length > TRAIL_MAX ? next.slice(next.length - TRAIL_MAX) : next;
+      });
+    });
     const offC = service.onConnection(setConnection);
     service.connect();
     // Tick so the stale transition happens without new packets.
@@ -68,9 +94,11 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
       telemetry,
       connection: effective,
       live,
+      trail,
+      source,
       reconnect: () => service.connect(),
     }),
-    [telemetry, effective, live],
+    [telemetry, effective, live, trail],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

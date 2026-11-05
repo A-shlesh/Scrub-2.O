@@ -1,12 +1,19 @@
 import type { Lake, LatLon } from '../types';
-import type { CoveragePlan } from './geo';
+import type { WaypointKind } from './coverage';
+
+/** The parts of a mission route an export needs. */
+export interface ExportRoute {
+  path: LatLon[];
+  kinds: WaypointKind[];
+  blocked: Array<[LatLon, LatLon]>;
+}
 
 export interface PlanExportInput {
   lake: Lake | null;
   boundary: LatLon[] | null;
   holes: LatLon[][];
-  plan: CoveragePlan;
-  cellSizeM: number;
+  plan: ExportRoute;
+  sweepSpacingM: number;
   shoreMarginM: number;
   /** cruise speed used for the time estimate, m/s */
   speedMps: number;
@@ -43,7 +50,7 @@ export function planToGeoJson(i: PlanExportInput) {
   i.plan.path.forEach((p, k) => {
     features.push({
       type: 'Feature',
-      properties: { role: 'waypoint', seq: k + 1, leg: i.plan.kinds[k] ?? 'lane' },
+      properties: { role: 'waypoint', sequence_order: k, type: i.plan.kinds[k] ?? 'COVERAGE' },
       geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
     });
   });
@@ -61,10 +68,10 @@ export function planToGeoJson(i: PlanExportInput) {
       lakeId: i.lake?.id ?? null,
       lakeName: i.lake?.name ?? null,
       generatedAt: i.generatedAt ?? new Date().toISOString(),
-      cellSizeM: i.cellSizeM,
+      sweepSpacingM: i.sweepSpacingM,
       shoreMarginM: i.shoreMarginM,
       waypoints: i.plan.path.length,
-      detourWaypoints: i.plan.kinds.filter((k) => k === 'detour').length,
+      transitWaypoints: i.plan.kinds.filter((k) => k === 'TRANSIT').length,
       blockedLegs: i.plan.blocked.length,
       planningSpeedMps: i.speedMps,
       estimatedSeconds: i.seconds === null ? null : Math.round(i.seconds),
@@ -75,8 +82,8 @@ export function planToGeoJson(i: PlanExportInput) {
 
 /** One waypoint per row, in visiting order. */
 export function planToCsv(i: PlanExportInput): string {
-  const rows = ['seq,latitude,longitude,type'];
-  i.plan.path.forEach((p, k) => rows.push(`${k + 1},${p.lat.toFixed(7)},${p.lon.toFixed(7)},${i.plan.kinds[k] ?? 'lane'}`));
+  const rows = ['sequence_order,latitude,longitude,type'];
+  i.plan.path.forEach((p, k) => rows.push(`${k},${p.lat.toFixed(7)},${p.lon.toFixed(7)},${i.plan.kinds[k] ?? 'COVERAGE'}`));
   return rows.join('\n') + '\n';
 }
 

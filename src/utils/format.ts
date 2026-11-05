@@ -39,9 +39,22 @@ export function fmtTime(iso: string | null): string {
   return d.toLocaleString();
 }
 
+const STATE_LABELS: Record<string, string> = {
+  idle: 'Idle',
+  loaded: 'Plan loaded',
+  transit: 'Navigating',
+  sampling: 'Sampling',
+  returning: 'Returning to GCS',
+  paused: 'Paused',
+  completed: 'Completed',
+  aborted: 'Aborted',
+  emergency_stop: 'Emergency stop',
+  error: 'Fault',
+};
+
 export function fmtMissionState(s: string): string {
   if (!s || s === 'unknown') return DASH;
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  return STATE_LABELS[s] ?? s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, ' ');
 }
 
 const COMPASS_POINTS = [

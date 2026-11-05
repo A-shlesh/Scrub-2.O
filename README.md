@@ -1,8 +1,8 @@
 # SCRUB dashboard
 
 Lake-monitoring dashboard for the SCRUB robot: live telemetry, lake selection on
-OpenStreetMap, boundaries and a configurable sampling grid, mission planning,
-and analytics.
+OpenStreetMap, lake polygons, polygon coverage missions (GCS → zigzag → GCS),
+sensor history and analytics. Robot contract: `docs/robot-protocol.md`.
 
 ## Run it
 
@@ -26,7 +26,7 @@ See `.env.example` for all variables.
 ## Tests
 
 ```bash
-npm test          # unit tests (vitest): grid, islands, path planner, OSM parsing, export, alerts
+npm test          # unit tests (vitest): coverage route, islands, mission payload, Pi API, telemetry parsing, OSM, export, alerts
 ```
 
 ## Photos (`public/`)
@@ -55,25 +55,40 @@ photos using the same file names.
   add, and **Resize -10% / +10%** for the whole outline. Undo steps back through
   every change. *Reset to OSM* restores the original. If OSM has no polygon for a
   lake you can draw one.
-- **Islands:** islands in the OSM outline are kept. No sampling point is placed on
-  one, and the robot path is routed around them.
-- **Grid size:** slider, 8-80 m. Each lake remembers
-  its own size. Mission Planner follows the same grid.
-- **Keep away from shore:** 0-100 m. Sampling points stay at least this far from the
+- **Islands:** islands in the OSM outline are kept. The robot route goes around them.
+- **Grid size:** slider, 8-80 m. The grid is only for analysing stored readings
+  (heatmap); the robot does not navigate by it.
+- **Keep away from shore:** 0-100 m. Sweep ends stay at least this far from the
   shore *and* from islands. Remembered per lake. Default is off (0).
 - **Map styles:** *Map* is OpenStreetMap, *Dark* is OSM data styled by CARTO,
   *Satellite* is Esri imagery (not OSM).
 
 ## Mission Planner
 
-- **Path check:** every leg of the serpentine path is tested against the shore and
-  islands. A leg that would cross land is rerouted through neighbouring grid cells
-  (amber on the map). A leg that cannot be routed is drawn red, reported, and
-  *Start Mission* refuses to proceed until the plan is fixed (change the grid
-  size, shore margin or boundary).
-- **Export:** *GeoJSON* (boundary with islands, path, numbered waypoints tagged
-  `lane` / `detour`, any blocked legs, planning parameters) and *CSV*
-  (`seq,latitude,longitude,type`) for the robot team.
+1. Select or draw the lake polygon in the Observatory.
+2. Set the **GCS** (ground control station) on the map, or use the robot's position.
+3. Set the **sweep spacing** (effective cleaning width). The zigzag route is drawn:
+   sweeps along the lake's long axis, alternating direction, inside the polygon.
+4. **Send plan & start mission:** the dashboard creates a mission id, records the
+   mission in Supabase, sends polygon + GCS + ordered waypoints to the Pi and waits
+   until the Pi confirms it validated and stored them (count and checksum must
+   match). Only then does it send the separate start command.
+5. Progress, current waypoint, distance to target and the return to GCS come from
+   the robot; nothing is marked active or completed until the robot says so.
+
+- **Path check:** every turn and connection is tested against the shore and islands.
+  A leg that would cross land is rerouted through the water (amber). A leg that
+  cannot be routed is drawn red and the plan cannot be sent until it is fixed.
+  The return to the GCS is drawn purple.
+- **Export:** *GeoJSON* and *CSV* (`sequence_order,latitude,longitude,type`).
+
+## Robot connection
+
+- `VITE_API_BASE_URL` set: missions and commands go to the Pi's REST API and live
+  telemetry comes from its WebSocket (`/ws/telemetry`). Use HTTPS/WSS on Vercel.
+- Not set: commands go through the Supabase `robot_commands` table and telemetry
+  through Supabase Realtime.
+- Supabase always stores missions and the sensor history (History page).
 
 ## Telemetry alerts
 
@@ -91,12 +106,13 @@ localStorage.removeItem('scrub:demoOverride')   // back to normal
 
 ```
 src/
-  pages/        Home, Observatory, Mission, Telemetry, Analytics
+  pages/        Home, Observatory, Mission, Telemetry, History, Analytics
   components/   Navbar, PageHeader, SensorCard, ChartCard, ObservatoryMap,
                 LakeSearch, LakeSetupPanel, LakeThumb
   stores/       lake (selection, boundary, grid), telemetry, theme
-  services/     osm (Nominatim/Overpass/tiles), realtime, analytics, storage
-  utils/        geo (grid, islands, land-safe path), exportPlan, thresholds, format
+  services/     osm (Nominatim/Overpass/tiles), realtime (WebSocket, Supabase), robot (Pi REST API),
+                supabase, analytics, storage
+  utils/        coverage (zigzag route), missionPayload, geo, gridAnalysis, exportPlan, thresholds, format
   demo/         demo data, only active with VITE_DEMO=1
   types/        shared data model
   styles/       global.css

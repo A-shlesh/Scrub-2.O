@@ -47,7 +47,7 @@ interface LakeCtx {
   cellSizeM: number;
   /** change the active lake's grid size in metres (clamped, remembered per lake) */
   setCellSize: (cellSizeM: number) => void;
-  /** keep sampling points at least this far (m) from the shore and islands; 0 = off */
+  /** keep the route (sweep ends) at least this far (m) from the shore and islands; 0 = off */
   shoreMarginM: number;
   setShoreMargin: (metres: number) => void;
   cells: GridCell[];
