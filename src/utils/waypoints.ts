@@ -1,4 +1,5 @@
 import type { GridCell, LatLon } from '../types';
+import { shoreCrossings, waterRoute } from './geo';
 
 /** waypoints.json, as sent to the robot. Format described in docs/robot-protocol.md. */
 export interface WaypointsFile {
@@ -31,6 +32,17 @@ export type WaypointType = 'gcs' | 'lane' | 'detour';
 export interface Route {
   path: LatLon[];
   kinds: WaypointType[];
+  /** in-water stretch added so the trip back to the GCS avoids land (for drawing), or null */
+  returnDetour: LatLon[] | null;
+  /** problems with the legs to and from the GCS, for the operator */
+  gcsWarnings: string[];
+}
+
+/** Lake geometry, so the legs to and from the GCS can be checked against land. */
+export interface Water {
+  cells: GridCell[];
+  boundary: LatLon[] | null;
+  holes: LatLon[][];
 }
 
 const distSq = (a: LatLon, b: LatLon) => {
@@ -38,19 +50,48 @@ const distSq = (a: LatLon, b: LatLon) => {
   return (a.lat - b.lat) ** 2 + ((a.lon - b.lon) * k) ** 2;
 };
 
+/** A leg to or from the GCS is fine when it crosses the shore at most once and no island. */
+function gcsLegOk(a: LatLon, b: LatLon, water: Water | undefined): boolean {
+  if (!water?.boundary || water.boundary.length < 3) return true;
+  const c = shoreCrossings(a, b, water.boundary, water.holes);
+  return c.shore <= 1 && c.islands === 0;
+}
+
 /**
  * The full mission route: GCS -> coverage path -> back to GCS. The coverage path is
  * reversed when its far end is nearer the GCS, so the robot enters at the closest cell.
+ * When the straight trip home would cross land, the robot first goes back through the
+ * water to the entry cell and leaves the lake the way it came in.
  * Without a GCS the coverage path is returned unchanged.
  */
-export function routeWithGcs(plan: { path: LatLon[]; kinds: Array<'lane' | 'detour'> }, gcs: LatLon | null): Route {
-  if (!gcs || plan.path.length === 0) return { path: plan.path, kinds: plan.kinds };
-  const first = plan.path[0];
-  const last = plan.path[plan.path.length - 1];
-  const reverse = distSq(gcs, last) < distSq(gcs, first);
+export function routeWithGcs(
+  plan: { path: LatLon[]; kinds: Array<'lane' | 'detour'> },
+  gcs: LatLon | null,
+  water?: Water,
+): Route {
+  if (!gcs || plan.path.length === 0) return { path: plan.path, kinds: plan.kinds, returnDetour: null, gcsWarnings: [] };
+  const reverse = distSq(gcs, plan.path[plan.path.length - 1]) < distSq(gcs, plan.path[0]);
   const path = reverse ? [...plan.path].reverse() : plan.path;
   const kinds = reverse ? [...plan.kinds].reverse() : plan.kinds;
-  return { path: [gcs, ...path, gcs], kinds: ['gcs', ...kinds, 'gcs'] };
+  const entry = path[0];
+  const last = path[path.length - 1];
+  const warnings: string[] = [];
+  if (!gcsLegOk(gcs, entry, water)) {
+    warnings.push('The straight line from the GCS to the first waypoint crosses land. Move the GCS so the robot can reach the water directly.');
+  }
+
+  let home: LatLon[] = [];
+  if (path.length > 1 && !gcsLegOk(last, gcs, water)) {
+    const via = water ? waterRoute(water.cells, water.boundary, water.holes, last, entry) : null;
+    if (via) home = [...via, entry];
+    else warnings.push('The trip back to the GCS crosses land and no route through the water was found.');
+  }
+  return {
+    path: [gcs, ...path, ...home, gcs],
+    kinds: ['gcs', ...kinds, ...home.map((): WaypointType => 'detour'), 'gcs'],
+    returnDetour: home.length > 0 ? [last, ...home] : null,
+    gcsWarnings: warnings,
+  };
 }
 
 const pointKey = (p: LatLon) => `${p.lat.toFixed(7)},${p.lon.toFixed(7)}`;
@@ -77,7 +118,7 @@ export async function waypointChecksum(waypoints: Waypoint[]): Promise<string> {
 }
 
 /** Waypoints in visiting order, each tied to its Supabase grid row when known. */
-export function planWaypoints(plan: Route, cells: GridCell[], cellToGridId: Map<string, string>): Waypoint[] {
+export function planWaypoints(plan: { path: LatLon[]; kinds: WaypointType[] }, cells: GridCell[], cellToGridId: Map<string, string>): Waypoint[] {
   const cellIds = cellIdsForPath(plan.path, cells);
   return plan.path.map((p, i) => {
     const cellId = plan.kinds[i] === 'gcs' ? null : cellIds[i];

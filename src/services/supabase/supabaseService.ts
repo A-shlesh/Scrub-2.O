@@ -18,10 +18,9 @@ const WRITE_CHUNK = 500;
 /** Ids per `.in()` filter, so the request URL stays well under server limits. */
 const IN_CHUNK = 150;
 
-/** A time as an ISO string in IST (Asia/Kolkata, UTC+5:30): the same instant, written as IST wall-clock with its offset. */
-export function istIso(ms: number = Date.now()): string {
-  const IST_MS = 5.5 * 60 * 60 * 1000;
-  return new Date(ms + IST_MS).toISOString().replace('Z', '+05:30');
+/** A time as an ISO-8601 string in UTC (the database stores instants; the screen shows local time). */
+export function utcIso(ms: number = Date.now()): string {
+  return new Date(ms).toISOString();
 }
 
 function polygonEwkt(points: LatLon[]): string {
@@ -114,7 +113,7 @@ export async function pushLakeAndGrids(lake: Lake, cells: GridCell[], cellSizeM:
   // and must not overwrite the parent's name/boundary.
   const isChildPolygon = !!lake.parentLakeId;
   const lakeId = getOrCreateSupabaseLakeId(supabaseLakeKey(lake));
-  const now = istIso();
+  const now = utcIso();
 
   if (!isChildPolygon) {
     const { error: lakeError } = await sb.from('lakes').upsert({
@@ -186,7 +185,7 @@ export async function createMission(
     device_id: deviceId,
     lake_id: supabaseLakeId,
     status: 'PENDING',
-    created_at: istIso(),
+    created_at: utcIso(),
     notes: null,
   });
   if (mErr) throw new Error(`Could not create mission: ${mErr.message}`);
@@ -338,7 +337,7 @@ export async function fetchSensorSamples(gridIds: string[], sinceMs: number | nu
   for (const ids of chunks(gridIds, IN_CHUNK)) {
     const rows = await selectAll<SensorSample>((from, to) => {
       let q = sb.from('sensor_samples').select('*').in('grid_id', ids);
-      if (sinceMs !== null) q = q.gte('recorded_at', istIso(sinceMs));
+      if (sinceMs !== null) q = q.gte('recorded_at', utcIso(sinceMs));
       return q.order('recorded_at', { ascending: true }).order('sample_id').range(from, to);
     });
     out.push(...rows);
@@ -359,7 +358,7 @@ export async function fetchDeviceSamples(deviceId: string, sinceMs: number): Pro
       .from('sensor_samples')
       .select('*')
       .eq('device_id', deviceId)
-      .gte('recorded_at', istIso(sinceMs))
+      .gte('recorded_at', utcIso(sinceMs))
       .order('recorded_at', { ascending: true })
       .order('sample_id')
       .range(from, to),
@@ -434,3 +433,43 @@ export function computeGridAnalytics(
 
   return { lakeId, cellAverages, sensorSummaries, totalSamples: samples.length, totalSessions: new Set(samples.map((s) => s.session_id)).size };
 }
+
+// ── Ground control station ─────────────────────────────────────────────
+
+/**
+ * The lake's GCS stored in Supabase (`lakes.gcs_lat` / `gcs_lon`). Returns undefined when
+ * it cannot be read (not configured, lake not uploaded yet, columns not added yet),
+ * null when the lake has no GCS.
+ */
+export async function fetchGcs(lake: Lake): Promise<LatLon | null | undefined> {
+  if (!supabaseConfigured || !supabase) return undefined;
+  const lakeId = getSupabaseLakeId(supabaseLakeKey(lake));
+  if (!lakeId) return undefined;
+  const { data, error } = await supabase.from('lakes').select('gcs_lat, gcs_lon').eq('lake_id', lakeId).maybeSingle();
+  if (error || !data) return undefined;
+  const row = data as { gcs_lat: number | null; gcs_lon: number | null };
+  return typeof row.gcs_lat === 'number' && typeof row.gcs_lon === 'number' ? { lat: row.gcs_lat, lon: row.gcs_lon } : null;
+}
+
+/** Store the lake's GCS in Supabase. Returns false when it could not be stored. */
+export async function saveGcsRemote(lake: Lake, gcs: LatLon | null): Promise<boolean> {
+  if (!supabaseConfigured || !supabase) return false;
+  const lakeId = getSupabaseLakeId(supabaseLakeKey(lake));
+  if (!lakeId) return false;
+  const { data, error } = await supabase
+    .from('lakes')
+    .update({ gcs_lat: gcs?.lat ?? null, gcs_lon: gcs?.lon ?? null })
+    .eq('lake_id', lakeId)
+    .select('lake_id');
+  return !error && Array.isArray(data) && data.length > 0;
+}
+
+/** grid_ids of the mission's cells the robot has finished sampling. */
+export async function fetchCompletedMissionGrids(missionId: string): Promise<Set<string>> {
+  const sb = client();
+  const rows = await selectAll<{ grid_id: string }>((from, to) =>
+    sb.from('mission_grids').select('grid_id').eq('mission_id', missionId).eq('status', 'COMPLETED').order('grid_id').range(from, to),
+  );
+  return new Set(rows.map((r) => r.grid_id));
+}
+

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { generateGrid, planCoverage } from './geo';
+import { generateGrid, planCoverage, shoreCrossings } from './geo';
 import { buildWaypointsFile, canonicalWaypointText, cellIdsForPath, planWaypoints, routeWithGcs, waypointChecksum } from './waypoints';
 import type { Waypoint } from './waypoints';
 
@@ -70,6 +70,51 @@ describe('planWaypoints', () => {
   });
 
   it('leaves the path unchanged when no GCS is set', () => {
-    expect(routeWithGcs(plan, null)).toEqual({ path: plan.path, kinds: plan.kinds });
+    expect(routeWithGcs(plan, null)).toMatchObject({ path: plan.path, kinds: plan.kinds, returnDetour: null, gcsWarnings: [] });
   });
 });
+
+describe('trip back to the GCS', () => {
+  const lake = [
+    { lat: 12.97, lon: 77.59 },
+    { lat: 12.97, lon: 77.594 },
+    { lat: 12.974, lon: 77.594 },
+    { lat: 12.974, lon: 77.59 },
+  ];
+  const island = [
+    { lat: 12.9712, lon: 77.5912 },
+    { lat: 12.9712, lon: 77.5928 },
+    { lat: 12.9728, lon: 77.5928 },
+    { lat: 12.9728, lon: 77.5912 },
+  ];
+  const cells = generateGrid(lake, 40, { holes: [island], lakePrefix: 'ISL' });
+  const plan = planCoverage(cells, lake, [island]);
+  const route0 = (gcs: { lat: number; lon: number }) => routeWithGcs(plan, gcs, { cells, boundary: lake, holes: [island] });
+
+  it('goes back through the water when the straight line home would cross an island', () => {
+    const entry = plan.path[0];
+    const last = plan.path[plan.path.length - 1];
+    // GCS on the south-west bank: nearest the path start, but the island lies between it and the path end.
+    const gcs = { lat: 12.9698, lon: 77.5905 };
+    expect(route0(gcs).path[1]).toEqual(entry);
+    expect(shoreCrossings(last, gcs, lake, [island]).islands).toBeGreaterThan(0);
+
+    const route = routeWithGcs(plan, gcs, { cells, boundary: lake, holes: [island] });
+    expect(route.gcsWarnings).toEqual([]);
+    expect(route.returnDetour).not.toBeNull();
+    // Every leg of the trip home stays off the island, and it leaves the lake at the entry cell.
+    const home = route.path.slice(plan.path.length);
+    const legs = [last, ...home];
+    for (let i = 1; i < legs.length; i++) expect(shoreCrossings(legs[i - 1], legs[i], lake, [island]).islands).toBe(0);
+    expect(route.path[route.path.length - 2]).toEqual(entry);
+    expect(route.kinds[route.kinds.length - 2]).toBe('detour');
+  });
+
+  it('warns when the GCS cannot reach the first waypoint without crossing land', () => {
+    const entry = plan.path[0];
+    const gcs = { lat: 12.972, lon: 77.592 }; // in the middle of the island
+    const route = routeWithGcs({ path: [entry], kinds: ['lane'] }, gcs, { cells, boundary: lake, holes: [island] });
+    expect(route.gcsWarnings.length).toBeGreaterThan(0);
+  });
+});
+

@@ -3,6 +3,7 @@ import { Link, NavLink, useLocation } from 'react-router-dom';
 import { ArrowRight, User } from 'lucide-react';
 import { useTheme } from '../stores/theme';
 import { useTelemetry } from '../stores/telemetry';
+import { LOGIN_REQUIRED, signOut } from './AuthGate';
 
 export function Navbar() {
   const { theme, toggle } = useTheme();
@@ -62,6 +63,11 @@ export function Navbar() {
                   <button type="button" onClick={() => { reconnect(); setMenuOpen(false); }}>
                     Retry connection
                   </button>
+                  {LOGIN_REQUIRED && (
+                    <button type="button" onClick={() => void signOut()}>
+                      Sign out
+                    </button>
+                  )}
                 </div>
               )}
             </div>
