@@ -1,5 +1,6 @@
 import type { GridCell, GridCellAverage, GridAnalytics, Lake, LatLon, SensorAverage, SensorKey, SensorMeta, SensorSample } from '../../types';
 import type { MissionPayload } from '../../utils/missionPayload';
+import { nextDemoNumber } from '../../utils/demoPath';
 import { openRing } from '../../utils/geo';
 import {
   getOrCreateSupabaseLakeId,
@@ -165,7 +166,7 @@ export async function createMission(localLakeId: string, supabaseLakeId: string,
     mission_id: payload.mission_id,
     device_id: payload.device_id,
     lake_id: supabaseLakeId,
-    polygon_geom: polygonEwkt(payload.polygon.map((p) => ({ lat: p.latitude, lon: p.longitude }))),
+    polygon_geom: payload.polygon.length >= 3 ? polygonEwkt(payload.polygon.map((p) => ({ lat: p.latitude, lon: p.longitude }))) : null,
     status: 'PENDING' satisfies MissionRowStatus,
     waypoint_load_ack: false,
     total_waypoints: payload.waypoint_count,
@@ -351,6 +352,64 @@ export async function fetchSensorHistory(q: {
  * Next free sample polygon number: one past the highest used either in this browser
  * (deleted polygons included) or in a Supabase `lakes` row named "Sample Polygon N".
  */
+/** Next "Demo N" number: one past the highest stored demo lake name. */
+export async function fetchNextDemoNumber(): Promise<number> {
+  const sb = client();
+  const { data, error } = await sb.from('lakes').select('name').like('name', 'Demo %');
+  if (error) throw dbError('Could not read demo names', error);
+  return nextDemoNumber(((data ?? []) as { name: string }[]).map((r) => r.name));
+}
+
+/** A `lakes` row for a demo: no boundary. Returns its lake_id. */
+export async function pushDemoLake(name: string): Promise<string> {
+  const sb = client();
+  const lakeId = crypto.randomUUID();
+  const { error } = await sb.from('lakes').insert({ lake_id: lakeId, name, boundary_geom: null, created_at: utcIso() });
+  if (error) throw dbError('Could not save the demo', error);
+  return lakeId;
+}
+
+export interface DemoMissionItem {
+  missionId: string;
+  name: string;
+  status: string;
+  createdAt: string;
+  points: number | null;
+}
+
+/** Missions of demo lakes ("Demo N"), newest first. */
+export async function fetchDemoMissions(deviceId: string, limit = 50): Promise<DemoMissionItem[]> {
+  const sb = client();
+  const { data: lakes, error } = await sb.from('lakes').select('lake_id, name').like('name', 'Demo %');
+  if (error) throw dbError(null, error);
+  const names = new Map(((lakes ?? []) as Array<{ lake_id: string; name: string }>).map((l) => [l.lake_id, l.name]));
+  if (names.size === 0) return [];
+  const out: DemoMissionItem[] = [];
+  for (const ids of chunks([...names.keys()], IN_CHUNK)) {
+    const { data, error: mErr } = await sb
+      .from('missions')
+      .select('mission_id, lake_id, status, created_at, total_waypoints')
+      .eq('device_id', deviceId)
+      .in('lake_id', ids)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (mErr) throw dbError(null, mErr);
+    for (const m of (data ?? []) as Array<{ mission_id: string; lake_id: string; status: string; created_at: string; total_waypoints: number | null }>) {
+      out.push({ missionId: m.mission_id, name: names.get(m.lake_id) ?? 'Demo', status: m.status, createdAt: m.created_at, points: numOrNull(m.total_waypoints) });
+    }
+  }
+  return out.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, limit);
+}
+
+/** A mission's waypoints in visiting order (latitude / longitude). */
+export async function fetchMissionWaypoints(missionId: string): Promise<LatLon[]> {
+  const sb = client();
+  const rows = await selectAll<{ sequence_order: number; latitude: number; longitude: number }>((from, to) =>
+    sb.from('mission_waypoints').select('sequence_order, latitude, longitude').eq('mission_id', missionId).order('sequence_order').range(from, to),
+  );
+  return rows.map((r) => ({ lat: Number(r.latitude), lon: Number(r.longitude) }));
+}
+
 export async function fetchNextPolygonNumber(): Promise<number> {
   let max = maxLocalSampleNumber();
   if (supabaseConfigured && supabase) {

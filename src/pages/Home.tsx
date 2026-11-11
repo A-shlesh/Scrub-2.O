@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { ArrowRight } from 'lucide-react';
+import { ArrowRight, Route } from 'lucide-react';
 import { Navbar } from '../components/Navbar';
 
 export function HomePage() {
@@ -15,6 +15,9 @@ export function HomePage() {
               <div className="hero-actions">
                 <Link to="/telemetry" className="btn-primary">
                   Open Dashboard <ArrowRight size={15} />
+                </Link>
+                <Link to="/demo" className="btn-glass">
+                  <Route size={15} /> Demo
                 </Link>
                 <Link to="/observatory" className="btn-glass">Learn More</Link>
               </div>

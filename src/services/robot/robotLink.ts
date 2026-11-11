@@ -7,7 +7,8 @@
  */
 import { API_BASE_URL, apiConfigured, insecureUrlProblem } from '../../config/backend';
 import type { MissionPayload } from '../../utils/missionPayload';
-import { getMissionStatus, health, post } from './piApi';
+import { getDemoDefaults, getMissionStatus, health, post } from './piApi';
+import type { DemoDefaults } from '../../utils/demoPath';
 import type { PiMissionStatus } from './piApi';
 
 export type MissionCommand = 'START' | 'PAUSE' | 'RESUME' | 'STOP' | 'RETURN_HOME' | 'EMERGENCY_STOP';
@@ -48,6 +49,8 @@ export interface RobotLink {
   missionStatus(missionId: string): Promise<PiMissionStatus | null>;
   /** true when GET /api/health answers 2xx; false when unreachable; null when not configured */
   health(): Promise<boolean | null>;
+  /** the Pi's demo calibration and limits, or null when unavailable */
+  demoDefaults(fallback: DemoDefaults): Promise<DemoDefaults | null>;
 }
 
 const PI_PATH: Record<Exclude<MissionCommand, 'EMERGENCY_STOP'>, string> = {
@@ -70,6 +73,7 @@ function makeLink(): RobotLink {
       command: () => Promise.reject(new Error(why)),
       missionStatus: async () => null,
       health: async () => null,
+      demoDefaults: async () => null,
     };
   }
   return {
@@ -84,6 +88,7 @@ function makeLink(): RobotLink {
     },
     missionStatus: (id) => getMissionStatus(id),
     health: () => health(),
+    demoDefaults: (fallback) => getDemoDefaults(fallback),
   };
 }
 

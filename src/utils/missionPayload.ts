@@ -42,6 +42,17 @@ export interface MissionPayload {
   /** SHA-256 of the waypoint list, see canonicalWaypointText */
   checksum: string;
   waypoints: MissionWaypoint[];
+  /** "demo" = drawn path, open-loop motor control (no polygon, no GCS-return rule) */
+  mode?: 'demo';
+  demo?: DemoBlock;
+}
+
+/** Demo mission block (docs/robot-protocol.md, section 9). x = east, y = north, metres. */
+export interface DemoBlock {
+  path_m: Array<{ x_m: number; y_m: number }>;
+  start_heading_deg: number;
+  calibration: { drive_mps_per_power: number; turn_dps_per_power: number };
+  max_power: number;
 }
 
 const round7 = (v: number) => Number(v.toFixed(7));
@@ -76,6 +87,8 @@ export async function buildMissionPayload(input: {
   path: LatLon[];
   kinds: WaypointKind[];
   createdAt?: string;
+  /** demo missions: polygon and islands are empty */
+  demo?: DemoBlock;
 }): Promise<MissionPayload> {
   const waypoints = toMissionWaypoints(input.path, input.kinds);
   return {
@@ -94,6 +107,17 @@ export async function buildMissionPayload(input: {
     waypoint_count: waypoints.length,
     checksum: await sha256Hex(canonicalWaypointText(waypoints)),
     waypoints,
+    ...(input.demo
+      ? {
+          mode: 'demo' as const,
+          demo: {
+            path_m: input.demo.path_m.map((q) => ({ x_m: Number(q.x_m.toFixed(3)), y_m: Number(q.y_m.toFixed(3)) })),
+            start_heading_deg: input.demo.start_heading_deg,
+            calibration: { ...input.demo.calibration },
+            max_power: input.demo.max_power,
+          },
+        }
+      : {}),
   };
 }
 

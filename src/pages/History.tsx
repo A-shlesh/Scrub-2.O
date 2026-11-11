@@ -9,6 +9,7 @@ import { DEMO } from '../demo/demo';
 import { ROBOT_ID, SENSOR_RECORD_SECONDS } from '../config/robot';
 import { useLake } from '../stores/lake';
 import { heatmapForSensor } from '../utils/gridAnalysis';
+import { isDemoName } from '../utils/demoPath';
 import { supabaseConfigured } from '../services/supabase/supabaseClient';
 import { fetchMissions, fetchSensorHistory, HISTORY_MAX_ROWS, SENSORS } from '../services/supabase/supabaseService';
 import type { MissionListItem } from '../services/supabase/supabaseService';
@@ -117,6 +118,7 @@ export function HistoryPage() {
   );
 
   const record = samples.find((s) => s.sample_id === selected) ?? null;
+  const selectedMission = missions.find((m) => m.missionId === missionId) ?? null;
 
   /** Water-quality heatmap: the loaded readings averaged per grid cell of the selected lake. */
   const heat = useMemo(() => (view === 'heatmap' ? heatmapForSensor(samples, cells, colourBy) : null), [view, samples, cells, colourBy]);
@@ -146,6 +148,7 @@ export function HistoryPage() {
                   <option value="">All missions</option>
                   {missions.map((m) => (
                     <option key={m.missionId} value={m.missionId}>
+                      {isDemoName(m.lakeName) ? 'DEMO · ' : ''}
                       {new Date(m.createdAt).toLocaleString()} · {m.lakeName ?? 'Lake'} · {m.status} · {m.missionId.slice(0, 8)}
                     </option>
                   ))}
@@ -166,7 +169,10 @@ export function HistoryPage() {
 
             {error && <div className="notice error" role="alert">{error}</div>}
             <div className="section-label">
-              {samples.length} records{truncated ? ` (first ${HISTORY_MAX_ROWS}; narrow the time range to see the rest)` : ''}
+              {selectedMission && isDemoName(selectedMission.lakeName) && <span className="badge">Demo</span>}{' '}
+              {selectedMission && isDemoName(selectedMission.lakeName)
+                ? `${selectedMission.lakeName}: demo missions record no sensor data.`
+                : `${samples.length} records${truncated ? ` (first ${HISTORY_MAX_ROWS}; narrow the time range to see the rest)` : ''}`}
             </div>
 
             <div className="history-map-row">

@@ -93,6 +93,20 @@ export interface Telemetry {
   waypointTotal?: number | null;
   motors?: MotorReading;
   navigation?: NavigationInfo;
+  /** simulated pose of a demo mission, dead-reckoned by the Pi from the motor packets it sent */
+  demo?: DemoTelemetry | null;
+}
+
+export interface DemoTelemetry {
+  active: boolean;
+  x_m: number | null;
+  y_m: number | null;
+  heading_deg: number | null;
+  /** path segment index (1 = start -> point 1) */
+  segment: number | null;
+  step: 'TURN' | 'DRIVE' | 'SETTLE' | null;
+  left: number | null;
+  right: number | null;
 }
 
 // ---------------------------------------------------------------------------

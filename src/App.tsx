@@ -8,6 +8,7 @@ import { MissionPage } from './pages/Mission';
 import { TelemetryPage } from './pages/Telemetry';
 import { AnalyticsPage } from './pages/Analytics';
 import { HistoryPage } from './pages/History';
+import { DemoPage } from './pages/Demo';
 import { AuthGate } from './components/AuthGate';
 
 export default function App() {
@@ -24,6 +25,7 @@ export default function App() {
               <Route path="/telemetry" element={<TelemetryPage />} />
               <Route path="/analytics" element={<AnalyticsPage />} />
               <Route path="/history" element={<HistoryPage />} />
+              <Route path="/demo" element={<DemoPage />} />
             </Routes>
           </BrowserRouter>
         </LakeProvider>

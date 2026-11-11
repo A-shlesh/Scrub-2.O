@@ -263,3 +263,42 @@ divided into cells and each reading assigned to the cell containing it
 (`src/utils/gridAnalysis.ts`: `classifyByPosition`, `averageByCell`), then averaged
 per cell for a colour-coded water-quality heatmap. The Analytics page already does
 this from `sensor_readings`.
+
+## 9. Demo missions (draw a path, open-loop motors)
+
+The Demo page (`/demo`) lets an operator draw a path on a blank canvas in metres
+(x = east, y = north = up, start at 0,0 facing up). The Pi turns it into TURN / DRIVE
+steps and sends only motor packets (no GPS, compass or STM32 packets needed). Same
+endpoints, same payload format (`scrub-mission/2`), same load acknowledgement.
+
+Payload additions to `POST /api/missions`:
+
+```json
+{
+  "mode": "demo",
+  "demo": {
+    "path_m": [{ "x_m": 0, "y_m": 0 }, { "x_m": 6, "y_m": 0 }, { "x_m": 6, "y_m": 8 }],
+    "start_heading_deg": 0,
+    "calibration": { "drive_mps_per_power": 0.004, "turn_dps_per_power": 0.5 },
+    "max_power": 200
+  }
+}
+```
+
+- `waypoints` holds the same points as lat/lon around the virtual origin (from
+  `GET /api/demo/defaults`, fallback `VITE_DEMO_ORIGIN`, default 12.9716, 77.5946), type
+  `GCS` for the first and `COVERAGE` for the rest, same checksum rule. `polygon` and
+  `islands` are empty; there is no "last waypoint is GCS" rule.
+- Motor model (both sides): v = drive_mps_per_power × (L + R) / 2 m/s; turn rate =
+  turn_dps_per_power × (L − R) / 2 °/s, clockwise positive. Steps last whole packets
+  (2 s); TURN uses equal and opposite power.
+
+`GET /api/demo/defaults` →
+`{"drive_mps_per_power", "turn_dps_per_power", "max_power", "max_path_m", "max_points", "min_segment_m", "origin": {"lat", "lon"}}`.
+
+Telemetry addition (in the normal frame, GPS fields untouched):
+`"demo": {"active": true, "x_m": 2.4, "y_m": 0.0, "heading_deg": 90.0, "segment": 1, "step": "TURN|DRIVE|SETTLE", "left": 100, "right": 100}`.
+
+Storage (existing schema only): one `lakes` row named `Demo N` with `boundary_geom`
+null, one `missions` row (`polygon_geom` null) and one `mission_waypoints` row per point.
+No `sensor_readings` during a demo.

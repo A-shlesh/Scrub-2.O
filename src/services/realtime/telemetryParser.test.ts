@@ -116,4 +116,12 @@ describe('parseTelemetry', () => {
     });
     expect(t).toMatchObject({ gps: { latitude: 1, longitude: 2 }, compass: { headingDeg: 10 }, missionState: 'paused', navigation: { progress: 0.2 } });
   });
+
+  it('parses the demo pose and ignores bad demo values', () => {
+    const t = parseTelemetry({ demo: { active: true, x_m: 2.4, y_m: 0, heading_deg: 90, segment: 1, step: 'drive', left: '+100', right: 100 } });
+    expect(t?.demo).toEqual({ active: true, x_m: 2.4, y_m: 0, heading_deg: 90, segment: 1, step: 'DRIVE', left: 100, right: 100 });
+    const bad = parseTelemetry({ demo: { active: 'yes', x_m: 'far', step: 'FLY' } });
+    expect(bad?.demo).toMatchObject({ active: false, x_m: null, step: null });
+    expect(parseTelemetry({ sensors: { ph: 7 } })?.demo).toBeNull();
+  });
 });

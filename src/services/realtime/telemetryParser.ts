@@ -104,6 +104,8 @@ export function parseTelemetry(payload: unknown, robotId = 'BOT001'): Telemetry 
   const pick = (nested: unknown, flat: unknown) => (nested !== undefined ? nested : flat);
   const sensor = (key: string, flatKey = key) => num(pick(sensors?.[key], p[flatKey]));
 
+  const demo = obj(p.demo);
+  const stepRaw = str(demo?.step)?.toUpperCase();
   const pctOld = num(nav?.progress_percent);
   const progress = num(nav?.progress) ?? (pctOld !== null ? pctOld / 100 : null);
   return {
@@ -132,5 +134,17 @@ export function parseTelemetry(payload: unknown, robotId = 'BOT001'): Telemetry 
       completedWaypoints: num(nav?.completed_waypoints) ?? num(p.completed_waypoints),
       progress: progress !== null && progress >= 0 && progress <= 1 ? progress : null,
     },
+    demo: demo
+      ? {
+          active: demo.active === true,
+          x_m: num(demo.x_m),
+          y_m: num(demo.y_m),
+          heading_deg: num(demo.heading_deg),
+          segment: num(demo.segment),
+          step: stepRaw === 'TURN' || stepRaw === 'DRIVE' || stepRaw === 'SETTLE' ? stepRaw : null,
+          left: motor(demo.left),
+          right: motor(demo.right),
+        }
+      : null,
   };
 }

@@ -15,6 +15,7 @@
 import { API_BASE_URL, insecureUrlProblem } from '../../config/backend';
 import { supabase } from '../supabase/supabaseClient';
 import type { RobotAnswer } from './robotLink';
+import type { DemoDefaults } from '../../utils/demoPath';
 
 export interface PiMissionStatus {
   missionId: string;
@@ -129,6 +130,38 @@ export async function health(timeoutMs = 5000): Promise<boolean> {
     return res.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * GET /api/demo/defaults: the Pi's demo calibration and limits. Missing fields fall back
+ * to `fallback`; null when the backend cannot be reached or has no demo support.
+ */
+export async function getDemoDefaults(fallback: DemoDefaults, timeoutMs = 5000): Promise<DemoDefaults | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url('/api/demo/defaults'), { headers: await headers(), signal: ctrl.signal });
+    if (!res.ok) return null;
+    const j = await readJson(res);
+    if (!j) return null;
+    const pos = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d);
+    const origin = (j.origin && typeof j.origin === 'object' ? j.origin : {}) as Record<string, unknown>;
+    const lat = num(origin.lat) ?? num(origin.latitude) ?? num(j.origin_lat);
+    const lon = num(origin.lon) ?? num(origin.longitude) ?? num(j.origin_lon);
+    return {
+      drive_mps_per_power: pos(j.drive_mps_per_power, fallback.drive_mps_per_power),
+      turn_dps_per_power: pos(j.turn_dps_per_power, fallback.turn_dps_per_power),
+      max_power: pos(j.max_power, fallback.max_power),
+      max_path_m: pos(j.max_path_m, fallback.max_path_m),
+      max_points: pos(j.max_points, fallback.max_points),
+      min_segment_m: pos(j.min_segment_m, fallback.min_segment_m),
+      origin: lat !== null && lon !== null ? { lat, lon } : fallback.origin,
+    };
+  } catch {
+    return null;
   } finally {
     clearTimeout(timer);
   }
