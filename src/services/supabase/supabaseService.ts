@@ -1,5 +1,6 @@
 import type { GridCell, GridCellAverage, GridAnalytics, Lake, LatLon, SensorAverage, SensorKey, SensorMeta, SensorSample } from '../../types';
 import type { MissionPayload } from '../../utils/missionPayload';
+import { nextDemoNumber } from '../../utils/demoPath';
 import { openRing } from '../../utils/geo';
 import {
   getOrCreateSupabaseLakeId,
@@ -42,7 +43,7 @@ async function selectAll<T>(page: (from: number, to: number) => PageResult<T>): 
   const out: T[] = [];
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await page(from, from + PAGE - 1);
-    if (error) throw new Error(error.message);
+    if (error) throw dbError(null, error);
     const rows = data ?? [];
     out.push(...rows);
     if (rows.length < PAGE) return out;
@@ -56,6 +57,19 @@ async function selectAll<T>(page: (from: number, to: number) => PageResult<T>): 
 //   mission_waypoints(waypoint_id, mission_id, sequence_order, latitude, longitude, waypoint_geom, status, created_at)
 //   sensor_readings(reading_id, local_record_id, mission_id, device_id, recorded_at, latitude, longitude,
 //                   position_geom, heading, ph, tds, turbidity, temperature_c, humidity_percent, created_at)
+
+/** True when Supabase refused because of row level security or a missing / expired sign-in. */
+export function isPermissionError(e: { code?: string; message?: string; status?: number } | null | undefined): boolean {
+  if (!e) return false;
+  if (e.code === '42501' || e.code === 'PGRST301' || e.code === 'PGRST302' || e.status === 401 || e.status === 403) return true;
+  return /row-level security|permission denied|jwt|not authori[sz]ed/i.test(e.message ?? '');
+}
+
+/** Error for a failed Supabase call: "Sign in required" for permission errors, else the message. */
+export function dbError(prefix: string | null, e: { code?: string; message?: string; status?: number }): Error {
+  if (isPermissionError(e)) return new Error('Sign in required: Supabase refused this request (row level security). Sign in as an operator and try again.');
+  return new Error(prefix ? `${prefix}: ${e.message}` : e.message ?? 'Supabase request failed.');
+}
 
 /** EWKT polygon (closed ring, longitude first), as PostGIS reads it. */
 export function polygonEwkt(points: LatLon[]): string {
@@ -125,11 +139,17 @@ export async function pushLake(lake: Lake): Promise<string> {
   const boundary = lake.scrubBoundary?.points ?? lake.osmBoundary?.points ?? null;
   if (!boundary || boundary.length < 3) throw new Error('This lake has no boundary to send.');
   const lakeId = getOrCreateSupabaseLakeId(supabaseLakeKey(lake));
-  const row = { lake_id: lakeId, name: lake.name ?? 'Unnamed', boundary_geom: polygonEwkt(boundary), created_at: utcIso() };
-  const { error } = lake.parentLakeId
-    ? await sb.from('lakes').upsert(row, { onConflict: 'lake_id', ignoreDuplicates: true })
-    : await sb.from('lakes').upsert(row);
-  if (error) throw new Error(`Could not save lake: ${error.message}`);
+  const fields = { name: lake.name ?? 'Unnamed', boundary_geom: polygonEwkt(boundary) };
+  // Create the row if it is new (created_at only then); an existing row keeps its created_at.
+  const { error } = await sb
+    .from('lakes')
+    .upsert({ lake_id: lakeId, ...fields, created_at: utcIso() }, { onConflict: 'lake_id', ignoreDuplicates: true });
+  if (error) throw dbError('Could not save lake', error);
+  if (!lake.parentLakeId) {
+    // A real lake keeps its name and outline current; a sample polygon never overwrites its parent's.
+    const { error: upErr } = await sb.from('lakes').update(fields).eq('lake_id', lakeId);
+    if (upErr) throw dbError('Could not save lake', upErr);
+  }
   return lakeId;
 }
 
@@ -146,7 +166,7 @@ export async function createMission(localLakeId: string, supabaseLakeId: string,
     mission_id: payload.mission_id,
     device_id: payload.device_id,
     lake_id: supabaseLakeId,
-    polygon_geom: polygonEwkt(payload.polygon.map((p) => ({ lat: p.latitude, lon: p.longitude }))),
+    polygon_geom: payload.polygon.length >= 3 ? polygonEwkt(payload.polygon.map((p) => ({ lat: p.latitude, lon: p.longitude }))) : null,
     status: 'PENDING' satisfies MissionRowStatus,
     waypoint_load_ack: false,
     total_waypoints: payload.waypoint_count,
@@ -155,7 +175,7 @@ export async function createMission(localLakeId: string, supabaseLakeId: string,
     created_at: payload.created_at,
     notes: null,
   });
-  if (error) throw new Error(`Could not create mission: ${error.message}`);
+  if (error) throw dbError('Could not create mission', error);
 
   const rows = payload.waypoints.map((w) => ({
     waypoint_id: crypto.randomUUID(),
@@ -173,7 +193,7 @@ export async function createMission(localLakeId: string, supabaseLakeId: string,
       // Best-effort rollback so a half-stored mission is never left PENDING.
       await sb.from('mission_waypoints').delete().eq('mission_id', payload.mission_id);
       await sb.from('missions').delete().eq('mission_id', payload.mission_id);
-      throw new Error(`Could not store the mission waypoints (batch ${i + 1}): ${wErr.message}`);
+      throw dbError(`Could not store the mission waypoints (batch ${i + 1})`, wErr);
     }
   }
   rememberMissionId(localLakeId, payload.mission_id);
@@ -239,14 +259,14 @@ export async function fetchLatestMission(lake: Lake): Promise<LatestMission> {
   const remembered = loadMissionId(lake.id);
   if (remembered) {
     const { data, error } = await sb.from('missions').select(cols).eq('mission_id', remembered).maybeSingle();
-    if (error) throw new Error(error.message);
+    if (error) throw dbError(null, error);
     return data ? toLatest(data as MissionRow) : EMPTY;
   }
   if (lake.parentLakeId) return EMPTY;
   const supaLakeId = getSupabaseLakeId(lake.id);
   if (!supaLakeId) return EMPTY;
   const { data, error } = await sb.from('missions').select(cols).eq('lake_id', supaLakeId).order('created_at', { ascending: false }).limit(1);
-  if (error) throw new Error(error.message);
+  if (error) throw dbError(null, error);
   return data && data.length > 0 ? toLatest(data[0] as MissionRow) : EMPTY;
 }
 
@@ -268,7 +288,7 @@ export async function fetchMissions(deviceId: string, limit = 100): Promise<Miss
     .eq('device_id', deviceId)
     .order('created_at', { ascending: false })
     .limit(limit);
-  if (error) throw new Error(error.message);
+  if (error) throw dbError(null, error);
   const rows = (data ?? []) as Array<{
     mission_id: string;
     status: string;
@@ -320,7 +340,7 @@ export async function fetchSensorHistory(q: {
       .order('recorded_at', { ascending: true })
       .order('reading_id')
       .range(from, Math.min(from + PAGE, HISTORY_MAX_ROWS) - 1);
-    if (error) throw new Error(error.message);
+    if (error) throw dbError(null, error);
     const rows = ((data ?? []) as unknown as ReadingRow[]).map(readingToSample);
     out.push(...rows);
     if (rows.length < PAGE) return { samples: out, truncated: false };
@@ -332,6 +352,64 @@ export async function fetchSensorHistory(q: {
  * Next free sample polygon number: one past the highest used either in this browser
  * (deleted polygons included) or in a Supabase `lakes` row named "Sample Polygon N".
  */
+/** Next "Demo N" number: one past the highest stored demo lake name. */
+export async function fetchNextDemoNumber(): Promise<number> {
+  const sb = client();
+  const { data, error } = await sb.from('lakes').select('name').like('name', 'Demo %');
+  if (error) throw dbError('Could not read demo names', error);
+  return nextDemoNumber(((data ?? []) as { name: string }[]).map((r) => r.name));
+}
+
+/** A `lakes` row for a demo: no boundary. Returns its lake_id. */
+export async function pushDemoLake(name: string): Promise<string> {
+  const sb = client();
+  const lakeId = crypto.randomUUID();
+  const { error } = await sb.from('lakes').insert({ lake_id: lakeId, name, boundary_geom: null, created_at: utcIso() });
+  if (error) throw dbError('Could not save the demo', error);
+  return lakeId;
+}
+
+export interface DemoMissionItem {
+  missionId: string;
+  name: string;
+  status: string;
+  createdAt: string;
+  points: number | null;
+}
+
+/** Missions of demo lakes ("Demo N"), newest first. */
+export async function fetchDemoMissions(deviceId: string, limit = 50): Promise<DemoMissionItem[]> {
+  const sb = client();
+  const { data: lakes, error } = await sb.from('lakes').select('lake_id, name').like('name', 'Demo %');
+  if (error) throw dbError(null, error);
+  const names = new Map(((lakes ?? []) as Array<{ lake_id: string; name: string }>).map((l) => [l.lake_id, l.name]));
+  if (names.size === 0) return [];
+  const out: DemoMissionItem[] = [];
+  for (const ids of chunks([...names.keys()], IN_CHUNK)) {
+    const { data, error: mErr } = await sb
+      .from('missions')
+      .select('mission_id, lake_id, status, created_at, total_waypoints')
+      .eq('device_id', deviceId)
+      .in('lake_id', ids)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (mErr) throw dbError(null, mErr);
+    for (const m of (data ?? []) as Array<{ mission_id: string; lake_id: string; status: string; created_at: string; total_waypoints: number | null }>) {
+      out.push({ missionId: m.mission_id, name: names.get(m.lake_id) ?? 'Demo', status: m.status, createdAt: m.created_at, points: numOrNull(m.total_waypoints) });
+    }
+  }
+  return out.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, limit);
+}
+
+/** A mission's waypoints in visiting order (latitude / longitude). */
+export async function fetchMissionWaypoints(missionId: string): Promise<LatLon[]> {
+  const sb = client();
+  const rows = await selectAll<{ sequence_order: number; latitude: number; longitude: number }>((from, to) =>
+    sb.from('mission_waypoints').select('sequence_order, latitude, longitude').eq('mission_id', missionId).order('sequence_order').range(from, to),
+  );
+  return rows.map((r) => ({ lat: Number(r.latitude), lon: Number(r.longitude) }));
+}
+
 export async function fetchNextPolygonNumber(): Promise<number> {
   let max = maxLocalSampleNumber();
   if (supabaseConfigured && supabase) {

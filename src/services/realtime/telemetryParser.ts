@@ -6,6 +6,10 @@
  *   (`gps.latitude`, `compass.heading`, `sensors.ph`, `motors.left`, ...) plus a
  *   `navigation` object with the Pi's mission state;
  * - flat (`lat`, `heading_deg`, `ph`, `mission_state`, ...), the original broadcast format.
+ * Older backend names are accepted as a fallback so the page degrades gracefully:
+ * `position.{latitude,longitude,gps_valid}`, top-level `heading`, `navigation.nav_state`,
+ * `navigation.current_waypoint_index`, `navigation.progress_percent` (0-100),
+ * `mission_status`, and a numeric epoch-milliseconds `timestamp`.
  *
  * Unknown, missing, wrong-typed or impossible values become null rather than being trusted.
  */
@@ -65,6 +69,17 @@ function point(latV: unknown, lonV: unknown): LatLon | null {
   return { lat, lon };
 }
 
+/** ISO string, or epoch milliseconds (seconds when small) converted to ISO; else null. */
+function isoTime(v: unknown): string | null {
+  if (typeof v === 'string' && v.trim() !== '') return v;
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+    const ms = v < 1e11 ? v * 1000 : v; // 1e11 ms is 1973; smaller values are seconds
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  return null;
+}
+
 export function parseTelemetry(payload: unknown, robotId = 'BOT001'): Telemetry | null {
   let p = obj(payload);
   if (!p) return null;
@@ -73,21 +88,29 @@ export function parseTelemetry(payload: unknown, robotId = 'BOT001'): Telemetry 
   if (wrapped && (p.type === 'telemetry' || p.type === undefined)) p = wrapped;
 
   const gps = obj(p.gps);
+  const position = obj(p.position); // older backend
   const compass = obj(p.compass);
   const sensors = obj(p.sensors);
   const motors = obj(p.motors);
   const nav = obj(p.navigation);
   const target = obj(nav?.target);
 
-  const pos = gps ? point(gps.latitude, gps.longitude) : point(p.lat, p.lon);
-  const fixFlag = gps?.fix ?? p.fix;
+  const pos = gps
+    ? point(gps.latitude, gps.longitude)
+    : position
+      ? point(position.latitude, position.longitude)
+      : point(p.lat, p.lon);
+  const fixFlag = gps?.fix ?? position?.gps_valid ?? p.fix;
   const pick = (nested: unknown, flat: unknown) => (nested !== undefined ? nested : flat);
   const sensor = (key: string, flatKey = key) => num(pick(sensors?.[key], p[flatKey]));
 
-  const progress = num(nav?.progress);
+  const demo = obj(p.demo);
+  const stepRaw = str(demo?.step)?.toUpperCase();
+  const pctOld = num(nav?.progress_percent);
+  const progress = num(nav?.progress) ?? (pctOld !== null ? pctOld / 100 : null);
   return {
     robotId: str(p.device_id) ?? str(p.robot_id) ?? robotId,
-    timestamp: str(p.timestamp) ?? str(p.ts),
+    timestamp: isoTime(p.timestamp) ?? isoTime(p.ts),
     sequence: num(p.sequence) ?? num(p.seq),
     water: { ph: sensor('ph'), turbidityNtu: sensor('turbidity'), tdsPpm: sensor('tds') },
     air: { aqi: num(p.aqi), temperatureC: sensor('temperature_c'), humidityPct: sensor('humidity_percent') },
@@ -98,11 +121,11 @@ export function parseTelemetry(payload: unknown, robotId = 'BOT001'): Telemetry 
       fix: pos !== null && fixFlag !== false,
       satellites: num(pick(gps?.satellites, p.satellites)),
     },
-    compass: { headingDeg: num(pick(compass?.heading, p.heading_deg)) },
+    compass: { headingDeg: num(compass?.heading) ?? num(p.heading_deg) ?? num(p.heading) },
     batteryPercent: num(p.battery_percent),
     missionId: str(nav?.mission_id) ?? str(p.mission_id),
-    missionState: normaliseMissionState(nav?.state ?? p.mission_state),
-    currentWaypoint: num(nav?.current_waypoint) ?? num(p.waypoint_index),
+    missionState: normaliseMissionState(nav?.state ?? nav?.nav_state ?? p.mission_state ?? p.mission_status),
+    currentWaypoint: num(nav?.current_waypoint) ?? num(nav?.current_waypoint_index) ?? num(p.waypoint_index),
     waypointTotal: num(nav?.total_waypoints) ?? num(p.waypoint_total),
     motors: { left: motor(motors?.left), right: motor(motors?.right) },
     navigation: {
@@ -111,5 +134,17 @@ export function parseTelemetry(payload: unknown, robotId = 'BOT001'): Telemetry 
       completedWaypoints: num(nav?.completed_waypoints) ?? num(p.completed_waypoints),
       progress: progress !== null && progress >= 0 && progress <= 1 ? progress : null,
     },
+    demo: demo
+      ? {
+          active: demo.active === true,
+          x_m: num(demo.x_m),
+          y_m: num(demo.y_m),
+          heading_deg: num(demo.heading_deg),
+          segment: num(demo.segment),
+          step: stepRaw === 'TURN' || stepRaw === 'DRIVE' || stepRaw === 'SETTLE' ? stepRaw : null,
+          left: motor(demo.left),
+          right: motor(demo.right),
+        }
+      : null,
   };
 }

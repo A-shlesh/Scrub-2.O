@@ -82,4 +82,46 @@ describe('parseTelemetry', () => {
     expect(normaliseMissionState('FAULT')).toBe('error');
     expect(normaliseMissionState('flying')).toBe('unknown');
   });
+
+  it('accepts the older backend names as a fallback', () => {
+    const t = parseTelemetry({
+      device_id: 'BOT001',
+      timestamp: 1793900000000, // epoch ms
+      position: { latitude: 12.91686, longitude: 77.48698, gps_valid: true },
+      heading: 87.5,
+      sensors: { ph: 7.1 },
+      mission_status: 'ACTIVE',
+      navigation: { nav_state: 'RETURNING', current_waypoint_index: 7, total_waypoints: 40, progress_percent: 45 },
+    });
+    expect(t).toMatchObject({
+      timestamp: new Date(1793900000000).toISOString(),
+      gps: { latitude: 12.91686, longitude: 77.48698, fix: true },
+      compass: { headingDeg: 87.5 },
+      missionState: 'returning',
+      currentWaypoint: 7,
+      waypointTotal: 40,
+      navigation: { progress: 0.45 },
+      batteryPercent: null,
+    });
+    expect(parseTelemetry({ position: { latitude: 12.9, longitude: 77.5, gps_valid: false } })?.gps.fix).toBe(false);
+    expect(parseTelemetry({ mission_status: 'ACTIVE' })?.missionState).toBe('transit');
+    expect(parseTelemetry({ timestamp: 1793900000 })?.timestamp).toBe(new Date(1793900000000).toISOString()); // seconds
+  });
+
+  it('prefers the current names when both are present', () => {
+    const t = parseTelemetry({
+      gps: { latitude: 1, longitude: 2 }, position: { latitude: 3, longitude: 4 },
+      compass: { heading: 10 }, heading: 20,
+      navigation: { state: 'PAUSED', nav_state: 'RETURNING', progress: 0.2, progress_percent: 90 },
+    });
+    expect(t).toMatchObject({ gps: { latitude: 1, longitude: 2 }, compass: { headingDeg: 10 }, missionState: 'paused', navigation: { progress: 0.2 } });
+  });
+
+  it('parses the demo pose and ignores bad demo values', () => {
+    const t = parseTelemetry({ demo: { active: true, x_m: 2.4, y_m: 0, heading_deg: 90, segment: 1, step: 'drive', left: '+100', right: 100 } });
+    expect(t?.demo).toEqual({ active: true, x_m: 2.4, y_m: 0, heading_deg: 90, segment: 1, step: 'DRIVE', left: 100, right: 100 });
+    const bad = parseTelemetry({ demo: { active: 'yes', x_m: 'far', step: 'FLY' } });
+    expect(bad?.demo).toMatchObject({ active: false, x_m: null, step: null });
+    expect(parseTelemetry({ sensors: { ph: 7 } })?.demo).toBeNull();
+  });
 });

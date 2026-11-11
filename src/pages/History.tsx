@@ -6,14 +6,17 @@ import { ObservatoryMap } from '../components/ObservatoryMap';
 import type { MapPoint } from '../components/ObservatoryMap';
 import { PageHeader } from '../components/PageHeader';
 import { DEMO } from '../demo/demo';
-import { SENSOR_RECORD_SECONDS } from '../config/robot';
-import { ROBOT_ID } from '../services/supabase/robotService';
+import { ROBOT_ID, SENSOR_RECORD_SECONDS } from '../config/robot';
+import { useLake } from '../stores/lake';
+import { heatmapForSensor } from '../utils/gridAnalysis';
+import { isDemoName } from '../utils/demoPath';
 import { supabaseConfigured } from '../services/supabase/supabaseClient';
 import { fetchMissions, fetchSensorHistory, HISTORY_MAX_ROWS, SENSORS } from '../services/supabase/supabaseService';
 import type { MissionListItem } from '../services/supabase/supabaseService';
 import type { SensorKey, SensorSample, SeriesPoint } from '../types';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const NO_POINTS: MapPoint[] = [];
 
 /** Date -> value for <input type="datetime-local"> in local time. */
 function toLocalInput(ms: number): string {
@@ -44,6 +47,8 @@ export function HistoryPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [colourBy, setColourBy] = useState<SensorKey>('ph');
+  const [view, setView] = useState<'points' | 'heatmap'>('points');
+  const { lake, cells, cellSizeM } = useLake();
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
@@ -113,6 +118,10 @@ export function HistoryPage() {
   );
 
   const record = samples.find((s) => s.sample_id === selected) ?? null;
+  const selectedMission = missions.find((m) => m.missionId === missionId) ?? null;
+
+  /** Water-quality heatmap: the loaded readings averaged per grid cell of the selected lake. */
+  const heat = useMemo(() => (view === 'heatmap' ? heatmapForSensor(samples, cells, colourBy) : null), [view, samples, cells, colourBy]);
 
   return (
     <>
@@ -139,6 +148,7 @@ export function HistoryPage() {
                   <option value="">All missions</option>
                   {missions.map((m) => (
                     <option key={m.missionId} value={m.missionId}>
+                      {isDemoName(m.lakeName) ? 'DEMO · ' : ''}
                       {new Date(m.createdAt).toLocaleString()} · {m.lakeName ?? 'Lake'} · {m.status} · {m.missionId.slice(0, 8)}
                     </option>
                   ))}
@@ -159,7 +169,10 @@ export function HistoryPage() {
 
             {error && <div className="notice error" role="alert">{error}</div>}
             <div className="section-label">
-              {samples.length} records{truncated ? ` (first ${HISTORY_MAX_ROWS}; narrow the time range to see the rest)` : ''}
+              {selectedMission && isDemoName(selectedMission.lakeName) && <span className="badge">Demo</span>}{' '}
+              {selectedMission && isDemoName(selectedMission.lakeName)
+                ? `${selectedMission.lakeName}: demo missions record no sensor data.`
+                : `${samples.length} records${truncated ? ` (first ${HISTORY_MAX_ROWS}; narrow the time range to see the rest)` : ''}`}
             </div>
 
             <div className="history-map-row">
@@ -167,18 +180,35 @@ export function HistoryPage() {
                 <ObservatoryMap
                   mode="browse"
                   style="light"
-                  showGrid={false}
-                  points={points}
+                  showGrid={view === 'heatmap'}
+                  gridCells={view === 'heatmap' ? cells : undefined}
+                  heatmapCells={heat?.cells ?? []}
+                  points={view === 'points' ? points : NO_POINTS}
                   selectedPointId={selected}
                   onPointClick={setSelected}
                 />
                 <div className="map-hint history-colour">
+                  <div className="seg" role="group" aria-label="Map view">
+                    <button type="button" aria-pressed={view === 'points'} onClick={() => setView('points')}>Points</button>
+                    <button type="button" aria-pressed={view === 'heatmap'} onClick={() => setView('heatmap')}>Heatmap</button>
+                  </div>
                   <label>
-                    Colour by{' '}
+                    {view === 'heatmap' ? 'Average' : 'Colour by'}{' '}
                     <select value={colourBy} onChange={(e) => setColourBy(e.target.value as SensorKey)}>
                       {SENSORS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
                     </select>
                   </label>
+                  {view === 'heatmap' && (
+                    <span className="heat-note">
+                      {!lake
+                        ? 'Select a lake in the Observatory to see its grid.'
+                        : cells.length === 0
+                          ? 'This lake has no grid yet (Observatory → grid size).'
+                          : heat && heat.cellsWithData > 0
+                            ? `${heat.cellsWithData} of ${cells.length} cells with readings · ${cellSizeM} m grid${heat.min !== null ? ` · ${fmt(heat.min)}–${fmt(heat.max)}` : ''}`
+                            : 'No readings inside this lake\'s grid for this filter.'}
+                    </span>
+                  )}
                 </div>
               </div>
               <section className="panel record-panel" aria-label="Selected record">

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ackMismatch, buildMissionPayload, canonicalWaypointText, sha256Hex, toMissionWaypoints } from './missionPayload';
 import { planMissionRoute } from './coverage';
+import { toLatLon } from './demoPath';
 
 const square = [
   { lat: 12.97, lon: 77.59 },
@@ -57,6 +58,25 @@ describe('mission payload', () => {
     expect(ackMismatch(sent, { waypoint_count: 12, checksum: 'ABC' })).toBeNull();
     expect(ackMismatch(sent, { waypoint_count: 11, checksum: 'abc' })).toMatch(/11 waypoints \(sent 12\)/);
     expect(ackMismatch(sent, { waypoint_count: 12, checksum: 'zzz' })).toMatch(/different checksum/);
-    expect(ackMismatch(sent, null)).toMatch(/no waypoints.*no checksum/);
+    expect(ackMismatch(sent, null)).toMatch(/old version, update the Pi/);
+    expect(ackMismatch(sent, { status: 'LOADED' })).toMatch(/old version, update the Pi/);
+    expect(ackMismatch(sent, { waypoint_count: 12 })).toMatch(/no checksum/);
+  });
+
+  it('builds a demo payload: drawn path in metres plus the same waypoints as lat/lon and checksum', async () => {
+    const origin = { lat: 12.9716, lon: 77.5946 };
+    const pathM = [{ x_m: 0, y_m: 0 }, { x_m: 5, y_m: 0 }, { x_m: 5, y_m: 3 }];
+    const ll = pathM.map((q) => toLatLon(q, origin));
+    const p = await buildMissionPayload({
+      missionId: 'd1', deviceId: 'BOT001', lakeId: 'lake-1', lakeName: 'Demo 3', gcs: ll[0], polygon: [], islands: [],
+      sweepSpacingM: 0, shoreMarginM: 0, acceptanceRadiusM: 1, path: ll, kinds: ['GCS', 'COVERAGE', 'COVERAGE'],
+      demo: { path_m: pathM, start_heading_deg: 0, calibration: { drive_mps_per_power: 0.004, turn_dps_per_power: 0.5 }, max_power: 200 },
+    });
+    expect(p.mode).toBe('demo');
+    expect(p.format).toBe('scrub-mission/2');
+    expect(p.polygon).toEqual([]);
+    expect(p.demo).toEqual({ path_m: pathM, start_heading_deg: 0, calibration: { drive_mps_per_power: 0.004, turn_dps_per_power: 0.5 }, max_power: 200 });
+    expect(p.waypoints.map((w) => w.type)).toEqual(['GCS', 'COVERAGE', 'COVERAGE']);
+    expect(p.checksum).toBe(await sha256Hex(canonicalWaypointText(p.waypoints)));
   });
 });

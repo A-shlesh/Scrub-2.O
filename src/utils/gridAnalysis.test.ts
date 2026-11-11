@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GridCell, SensorSample } from '../types';
-import { averageByCell, classifyByPosition } from './gridAnalysis';
+import { averageByCell, classifyByPosition, heatmapForSensor } from './gridAnalysis';
 
 const cell = (id: string, lat0: number, lon0: number): GridCell => ({
   id,
@@ -42,5 +42,16 @@ describe('GPS-to-grid analysis (future heatmap)', () => {
     expect(out.find((c) => c.cellId === 'A')!.averages.ph).toBeCloseTo(7.2, 6);
     expect(out.find((c) => c.cellId === 'B')!.averages.ph).toBeCloseTo(6.9, 6);
     expect(out.find((c) => c.cellId === 'B')!.averages.tds).toBeNull();
+  });
+
+  it('builds a heatmap of one sensor, coloured per cell, skipping cells without data', () => {
+    const C = cell('C', 12.98, 77.6); // no readings
+    const h = heatmapForSensor(samples, [A, B, C], 'ph');
+    expect(h.cellsWithData).toBe(2);
+    expect(h.cells.map((c) => c.gridCode).sort()).toEqual(['A', 'B']);
+    expect(h.min).toBeCloseTo(6.9, 6);
+    expect(h.max).toBeCloseTo(7.2, 6);
+    expect(h.cells.every((c) => c.color.startsWith('#'))).toBe(true);
+    expect(heatmapForSensor(samples, [A, B], 'tds').cellsWithData).toBe(0);
   });
 });

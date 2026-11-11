@@ -17,9 +17,10 @@ STM32 <──UART (every 2 s)── Raspberry Pi 5           └──> Supabase
 | Sensor history (one record every 10 s) | Pi → Supabase → dashboard | `sensor_readings` rows |
 | Mission records, waypoints and status | dashboard + Pi → Supabase | `missions`, `mission_waypoints` rows |
 
-**Fallback without a Pi URL.** When `VITE_API_BASE_URL` is not set, the dashboard
-uses the Supabase channel instead: commands as rows in `robot_commands` and telemetry
-over Supabase Realtime Broadcast (section 7). The payloads are the same.
+**No fallback.** Commands only ever go to the Pi. When `VITE_API_BASE_URL` is not set
+the dashboard refuses to send anything and shows "Robot backend not configured".
+Live telemetry comes from the Pi WebSocket; Supabase Realtime Broadcast is used only
+with `VITE_TELEMETRY_SOURCE=supabase` (section 7).
 
 The robot id is `BOT001` unless the dashboard sets `VITE_ROBOT_ID`.
 All timestamps are ISO-8601 UTC (`...Z`).
@@ -241,22 +242,18 @@ Raspberry Pi → STM32, every 2 s:
 { "left": "+100", "right": "+100", "mode": "auto" }
 ```
 
-## 7. Supabase channel (when no Pi URL is configured)
+## 7. Authentication and optional Supabase telemetry
 
-- Commands: the dashboard inserts a row in `robot_commands` (`command_id`,
-  `device_id`, `mission_id`, `command`, `payload`, `status = 'PENDING'`). Commands:
-  `LOAD_WAYPOINTS` (payload = mission payload, section 2), `START`, `PAUSE`,
-  `RESUME`, `STOP` (= abort), `RETURN_HOME`, `EMERGENCY_STOP`.
-- The Pi listens (Realtime `postgres_changes` on `robot_commands`, filter
-  `device_id=eq.BOT001`, plus a query for `PENDING` rows after every reconnect) and
-  answers by updating the same row once: `ACKED` with `ack`, or `REJECTED` with
-  `detail`. Only update rows that are still `PENDING`; ignore rows older than 60 s.
-  The dashboard marks unanswered rows `EXPIRED` (30 s for `LOAD_WAYPOINTS`, 15 s
-  for the rest), so they are never acted on late.
-- `ack` for `LOAD_WAYPOINTS`: `{"waypoint_count", "checksum", "stored_at"}`
-  (recomputed, as in section 1); for the others `{"mission_state": "<new state>"}`.
-- Live telemetry: Realtime Broadcast, channel `robot:BOT001`, event `telemetry`,
-  same frame as section 3.
+- REST: every request carries `Authorization: Bearer <Supabase access token>` when an
+  operator is signed in.
+- WebSocket: browsers cannot set headers, so the token is sent as a query parameter:
+  `/ws/telemetry?token=<access token>`. The dashboard reconnects with a fresh token when
+  Supabase refreshes it. Without a session it connects without `token`.
+- A 401/403 answer is shown as "Not signed in / not authorised for the robot".
+- Errors: `{"detail": "reason"}`, or `{"errors": ["reason", ...]}`.
+- Optional, off by default: with `VITE_TELEMETRY_SOURCE=supabase` the dashboard listens
+  on Supabase Realtime Broadcast, channel `robot:BOT001`, event `telemetry` (same frame
+  as section 3) instead of the WebSocket. There is no Supabase command table.
 
 ## 8. Future: geographical grid analysis
 
@@ -266,3 +263,42 @@ divided into cells and each reading assigned to the cell containing it
 (`src/utils/gridAnalysis.ts`: `classifyByPosition`, `averageByCell`), then averaged
 per cell for a colour-coded water-quality heatmap. The Analytics page already does
 this from `sensor_readings`.
+
+## 9. Demo missions (draw a path, open-loop motors)
+
+The Demo page (`/demo`) lets an operator draw a path on a blank canvas in metres
+(x = east, y = north = up, start at 0,0 facing up). The Pi turns it into TURN / DRIVE
+steps and sends only motor packets (no GPS, compass or STM32 packets needed). Same
+endpoints, same payload format (`scrub-mission/2`), same load acknowledgement.
+
+Payload additions to `POST /api/missions`:
+
+```json
+{
+  "mode": "demo",
+  "demo": {
+    "path_m": [{ "x_m": 0, "y_m": 0 }, { "x_m": 6, "y_m": 0 }, { "x_m": 6, "y_m": 8 }],
+    "start_heading_deg": 0,
+    "calibration": { "drive_mps_per_power": 0.004, "turn_dps_per_power": 0.5 },
+    "max_power": 200
+  }
+}
+```
+
+- `waypoints` holds the same points as lat/lon around the virtual origin (from
+  `GET /api/demo/defaults`, fallback `VITE_DEMO_ORIGIN`, default 12.9716, 77.5946), type
+  `GCS` for the first and `COVERAGE` for the rest, same checksum rule. `polygon` and
+  `islands` are empty; there is no "last waypoint is GCS" rule.
+- Motor model (both sides): v = drive_mps_per_power × (L + R) / 2 m/s; turn rate =
+  turn_dps_per_power × (L − R) / 2 °/s, clockwise positive. Steps last whole packets
+  (2 s); TURN uses equal and opposite power.
+
+`GET /api/demo/defaults` →
+`{"drive_mps_per_power", "turn_dps_per_power", "max_power", "max_path_m", "max_points", "min_segment_m", "origin": {"lat", "lon"}}`.
+
+Telemetry addition (in the normal frame, GPS fields untouched):
+`"demo": {"active": true, "x_m": 2.4, "y_m": 0.0, "heading_deg": 90.0, "segment": 1, "step": "TURN|DRIVE|SETTLE", "left": 100, "right": 100}`.
+
+Storage (existing schema only): one `lakes` row named `Demo N` with `boundary_geom`
+null, one `missions` row (`polygon_geom` null) and one `mission_waypoints` row per point.
+No `sensor_readings` during a demo.

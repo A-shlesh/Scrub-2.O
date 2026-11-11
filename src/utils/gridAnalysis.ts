@@ -7,6 +7,7 @@
  */
 import type { GridCell, SensorKey, SensorSample } from '../types';
 import { pointInPolygon } from './geo';
+import { SENSORS } from '../services/supabase/supabaseService';
 
 const KEYS: SensorKey[] = ['ph', 'tds', 'turbidity', 'temperature_c', 'humidity_percent'];
 
@@ -46,4 +47,35 @@ export function averageByCell(samples: SensorSample[], cells: GridCell[]): CellS
     }
     return { cellId, count: list.length, averages };
   });
+}
+
+export interface SensorHeatmap {
+  /** one entry per cell with readings, coloured on the sensor's scale */
+  cells: Array<{ gridCode: string; color: string; value: number | null }>;
+  cellsWithData: number;
+  min: number | null;
+  max: number | null;
+}
+
+/**
+ * Heatmap of one sensor: readings averaged per cell, each cell coloured on that sensor's
+ * 5-step scale (SENSORS in supabaseService). Cells without readings are left out.
+ */
+export function heatmapForSensor(samples: SensorSample[], cells: GridCell[], key: SensorKey): SensorHeatmap {
+  const meta = SENSORS.find((m) => m.key === key);
+  const values = averageByCell(samples, cells)
+    .map((c) => ({ cellId: c.cellId, value: c.averages[key] }))
+    .filter((c): c is { cellId: string; value: number } => c.value !== null);
+  const colour = (v: number): string => {
+    if (!meta) return '#9ca3af';
+    const t = (v - meta.min) / (meta.max - meta.min);
+    return meta.colors[Math.max(0, Math.min(4, Math.floor(t * 5)))];
+  };
+  const vs = values.map((c) => c.value);
+  return {
+    cells: values.map((c) => ({ gridCode: c.cellId, color: colour(c.value), value: c.value })),
+    cellsWithData: values.length,
+    min: vs.length ? Math.min(...vs) : null,
+    max: vs.length ? Math.max(...vs) : null,
+  };
 }

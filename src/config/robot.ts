@@ -21,3 +21,5 @@ export const BATTERY_RESERVE_PCT = 20;
 export const MIN_START_BATTERY_PCT = 30;
 /** The robot stores one sensor record every this many seconds (locally and in the cloud). */
 export const SENSOR_RECORD_SECONDS = 10;
+/** The robot this dashboard controls (missions.device_id, sensor_readings.device_id). */
+export const ROBOT_ID = (import.meta.env.VITE_ROBOT_ID as string | undefined)?.trim() || 'BOT001';
