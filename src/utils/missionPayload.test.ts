@@ -57,6 +57,8 @@ describe('mission payload', () => {
     expect(ackMismatch(sent, { waypoint_count: 12, checksum: 'ABC' })).toBeNull();
     expect(ackMismatch(sent, { waypoint_count: 11, checksum: 'abc' })).toMatch(/11 waypoints \(sent 12\)/);
     expect(ackMismatch(sent, { waypoint_count: 12, checksum: 'zzz' })).toMatch(/different checksum/);
-    expect(ackMismatch(sent, null)).toMatch(/no waypoints.*no checksum/);
+    expect(ackMismatch(sent, null)).toMatch(/old version, update the Pi/);
+    expect(ackMismatch(sent, { status: 'LOADED' })).toMatch(/old version, update the Pi/);
+    expect(ackMismatch(sent, { waypoint_count: 12 })).toMatch(/no checksum/);
   });
 });

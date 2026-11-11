@@ -6,7 +6,7 @@ import { Navbar } from '../components/Navbar';
 import { PageHeader } from '../components/PageHeader';
 import { SensorCard } from '../components/SensorCard';
 import { fetchDeviceSamples } from '../services/supabase/supabaseService';
-import { ROBOT_ID } from '../services/supabase/robotService';
+import { ROBOT_ID } from '../config/robot';
 import { supabaseConfigured } from '../services/supabase/supabaseClient';
 import type { SensorKey, SensorSample, SeriesPoint } from '../types';
 import { useTelemetry } from '../stores/telemetry';

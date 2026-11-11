@@ -85,11 +85,37 @@ photos using the same file names.
 
 ## Robot connection
 
-- `VITE_API_BASE_URL` set: missions and commands go to the Pi's REST API and live
-  telemetry comes from its WebSocket (`/ws/telemetry`). Use HTTPS/WSS on Vercel.
-- Not set: commands go through the Supabase `robot_commands` table and telemetry
-  through Supabase Realtime.
-- Supabase always stores missions and the sensor history (History page).
+- Missions and commands always go to the Pi's REST API (`VITE_API_BASE_URL`), and live
+  telemetry comes from its WebSocket (`/ws/telemetry`). There is no Supabase command
+  path. Without `VITE_API_BASE_URL` the Mission and Demo pages show
+  "Robot backend not configured" and the send / start buttons stay disabled.
+- Signed-in operators send their Supabase access token to the Pi: as
+  `Authorization: Bearer …` on REST, and as `?token=…` on the WebSocket (browsers cannot
+  set WebSocket headers).
+- Supabase stores lakes, missions, waypoints and the sensor history (shared schema,
+  `supabase/schema.sql`).
+- The browser console prints the build's transport and URLs at start-up
+  (`[SCRUB] build config`), and the Mission page shows the backend URL and its health,
+  so a build made with the wrong environment is easy to spot.
+
+## Vercel environment variables
+
+Set these for **Production and Preview**, then redeploy **without the build cache**:
+Vite copies `VITE_*` values into the bundle at build time, so changing them has no effect
+until a new build.
+
+| Variable | Value |
+|---|---|
+| `VITE_SUPABASE_URL` | `https://<project-id>.supabase.co` |
+| `VITE_SUPABASE_ANON_KEY` | the anon / publishable key (never the service-role / secret key) |
+| `VITE_API_BASE_URL` | `https://<tunnel-host>` (the Pi backend) |
+| `VITE_WS_BASE_URL` | `wss://<tunnel-host>` |
+| `VITE_ROBOT_ID` | `BOT001` |
+| `VITE_REQUIRE_LOGIN` | `1`, once Supabase row level security is enabled (`supabase/optional/operator_security.sql`) |
+| `VITE_DEMO` | leave **unset** (it turns on fake data) |
+
+Optional: `VITE_ROBOT_SPEED_MPS`, `VITE_BATTERY_MINUTES`, `VITE_SWEEP_SPACING_M`,
+`VITE_ACCEPTANCE_RADIUS_M`, `VITE_DEMO_ORIGIN` (see `.env.example`).
 
 ## Telemetry alerts
 

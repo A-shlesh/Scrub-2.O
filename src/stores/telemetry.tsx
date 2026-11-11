@@ -33,9 +33,19 @@ const Ctx = createContext<TelemetryCtx>({
 /** Positions kept for the live track on the maps. */
 const TRAIL_MAX = 600;
 
-// Single shared instance: the Pi's WebSocket when VITE_WS_BASE_URL / VITE_API_BASE_URL is set,
-// else Supabase Realtime. VITE_DEMO=1 swaps in synthetic telemetry for design review only.
-const source: TelemetryCtx['source'] = DEMO ? 'demo' : wsConfigured ? 'pi' : supabaseConfigured ? 'supabase' : 'none';
+// Single shared instance. Default: the Pi's WebSocket (VITE_WS_BASE_URL, or VITE_API_BASE_URL
+// with ws/wss). Supabase Realtime Broadcast only with VITE_TELEMETRY_SOURCE=supabase (the Pi
+// does not broadcast there by default). VITE_DEMO=1 swaps in synthetic telemetry for design review.
+const wantSupabase = (import.meta.env.VITE_TELEMETRY_SOURCE as string | undefined)?.trim().toLowerCase() === 'supabase';
+const source: TelemetryCtx['source'] = DEMO
+  ? 'demo'
+  : wantSupabase
+    ? supabaseConfigured
+      ? 'supabase'
+      : 'none'
+    : wsConfigured
+      ? 'pi'
+      : 'none';
 const service: RealtimeService =
   source === 'demo'
     ? new DemoRealtimeService()

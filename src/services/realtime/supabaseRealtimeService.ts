@@ -6,7 +6,7 @@
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import type { ConnectionState } from '../../types';
 import { supabase } from '../supabase/supabaseClient';
-import { ROBOT_ID } from '../supabase/robotService';
+import { ROBOT_ID } from '../../config/robot';
 import type { ConnectionListener, RealtimeService, TelemetryListener } from './realtimeService';
 import { parseTelemetry } from './telemetryParser';
 

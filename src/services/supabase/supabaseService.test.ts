@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { GridCell, SensorSample } from '../../types';
 import { generateGrid } from '../../utils/geo';
-import { computeGridAnalytics, pointEwkt, polygonEwkt, readingToSample } from './supabaseService';
+import { computeGridAnalytics, dbError, isPermissionError, pointEwkt, polygonEwkt, readingToSample } from './supabaseService';
 
 const square = [
   { lat: 12.97, lon: 77.59 },
@@ -34,6 +34,16 @@ describe('geometry columns (boundary_geom, polygon_geom, waypoint_geom)', () => 
     expect(polygonEwkt([{ lat: 1, lon: 2 }, { lat: 3, lon: 4 }, { lat: 5, lon: 6 }])).toBe('SRID=4326;POLYGON((2 1, 4 3, 6 5, 2 1))');
     // an already-closed ring is not closed twice
     expect(polygonEwkt([{ lat: 1, lon: 2 }, { lat: 3, lon: 4 }, { lat: 5, lon: 6 }, { lat: 1, lon: 2 }])).toBe('SRID=4326;POLYGON((2 1, 4 3, 6 5, 2 1))');
+  });
+});
+
+describe('Supabase permission errors', () => {
+  it('shows "Sign in required" for row level security and auth failures', () => {
+    expect(isPermissionError({ code: '42501', message: 'new row violates row-level security policy' })).toBe(true);
+    expect(isPermissionError({ message: 'JWT expired' })).toBe(true);
+    expect(isPermissionError({ code: '23505', message: 'duplicate key' })).toBe(false);
+    expect(dbError('Could not save lake', { code: '42501', message: 'x' }).message).toMatch(/^Sign in required/);
+    expect(dbError('Could not save lake', { code: '23505', message: 'duplicate key' }).message).toBe('Could not save lake: duplicate key');
   });
 });
 

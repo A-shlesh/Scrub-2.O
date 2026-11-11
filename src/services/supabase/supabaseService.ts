@@ -42,7 +42,7 @@ async function selectAll<T>(page: (from: number, to: number) => PageResult<T>): 
   const out: T[] = [];
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await page(from, from + PAGE - 1);
-    if (error) throw new Error(error.message);
+    if (error) throw dbError(null, error);
     const rows = data ?? [];
     out.push(...rows);
     if (rows.length < PAGE) return out;
@@ -56,6 +56,19 @@ async function selectAll<T>(page: (from: number, to: number) => PageResult<T>): 
 //   mission_waypoints(waypoint_id, mission_id, sequence_order, latitude, longitude, waypoint_geom, status, created_at)
 //   sensor_readings(reading_id, local_record_id, mission_id, device_id, recorded_at, latitude, longitude,
 //                   position_geom, heading, ph, tds, turbidity, temperature_c, humidity_percent, created_at)
+
+/** True when Supabase refused because of row level security or a missing / expired sign-in. */
+export function isPermissionError(e: { code?: string; message?: string; status?: number } | null | undefined): boolean {
+  if (!e) return false;
+  if (e.code === '42501' || e.code === 'PGRST301' || e.code === 'PGRST302' || e.status === 401 || e.status === 403) return true;
+  return /row-level security|permission denied|jwt|not authori[sz]ed/i.test(e.message ?? '');
+}
+
+/** Error for a failed Supabase call: "Sign in required" for permission errors, else the message. */
+export function dbError(prefix: string | null, e: { code?: string; message?: string; status?: number }): Error {
+  if (isPermissionError(e)) return new Error('Sign in required: Supabase refused this request (row level security). Sign in as an operator and try again.');
+  return new Error(prefix ? `${prefix}: ${e.message}` : e.message ?? 'Supabase request failed.');
+}
 
 /** EWKT polygon (closed ring, longitude first), as PostGIS reads it. */
 export function polygonEwkt(points: LatLon[]): string {
@@ -125,11 +138,17 @@ export async function pushLake(lake: Lake): Promise<string> {
   const boundary = lake.scrubBoundary?.points ?? lake.osmBoundary?.points ?? null;
   if (!boundary || boundary.length < 3) throw new Error('This lake has no boundary to send.');
   const lakeId = getOrCreateSupabaseLakeId(supabaseLakeKey(lake));
-  const row = { lake_id: lakeId, name: lake.name ?? 'Unnamed', boundary_geom: polygonEwkt(boundary), created_at: utcIso() };
-  const { error } = lake.parentLakeId
-    ? await sb.from('lakes').upsert(row, { onConflict: 'lake_id', ignoreDuplicates: true })
-    : await sb.from('lakes').upsert(row);
-  if (error) throw new Error(`Could not save lake: ${error.message}`);
+  const fields = { name: lake.name ?? 'Unnamed', boundary_geom: polygonEwkt(boundary) };
+  // Create the row if it is new (created_at only then); an existing row keeps its created_at.
+  const { error } = await sb
+    .from('lakes')
+    .upsert({ lake_id: lakeId, ...fields, created_at: utcIso() }, { onConflict: 'lake_id', ignoreDuplicates: true });
+  if (error) throw dbError('Could not save lake', error);
+  if (!lake.parentLakeId) {
+    // A real lake keeps its name and outline current; a sample polygon never overwrites its parent's.
+    const { error: upErr } = await sb.from('lakes').update(fields).eq('lake_id', lakeId);
+    if (upErr) throw dbError('Could not save lake', upErr);
+  }
   return lakeId;
 }
 
@@ -155,7 +174,7 @@ export async function createMission(localLakeId: string, supabaseLakeId: string,
     created_at: payload.created_at,
     notes: null,
   });
-  if (error) throw new Error(`Could not create mission: ${error.message}`);
+  if (error) throw dbError('Could not create mission', error);
 
   const rows = payload.waypoints.map((w) => ({
     waypoint_id: crypto.randomUUID(),
@@ -173,7 +192,7 @@ export async function createMission(localLakeId: string, supabaseLakeId: string,
       // Best-effort rollback so a half-stored mission is never left PENDING.
       await sb.from('mission_waypoints').delete().eq('mission_id', payload.mission_id);
       await sb.from('missions').delete().eq('mission_id', payload.mission_id);
-      throw new Error(`Could not store the mission waypoints (batch ${i + 1}): ${wErr.message}`);
+      throw dbError(`Could not store the mission waypoints (batch ${i + 1})`, wErr);
     }
   }
   rememberMissionId(localLakeId, payload.mission_id);
@@ -239,14 +258,14 @@ export async function fetchLatestMission(lake: Lake): Promise<LatestMission> {
   const remembered = loadMissionId(lake.id);
   if (remembered) {
     const { data, error } = await sb.from('missions').select(cols).eq('mission_id', remembered).maybeSingle();
-    if (error) throw new Error(error.message);
+    if (error) throw dbError(null, error);
     return data ? toLatest(data as MissionRow) : EMPTY;
   }
   if (lake.parentLakeId) return EMPTY;
   const supaLakeId = getSupabaseLakeId(lake.id);
   if (!supaLakeId) return EMPTY;
   const { data, error } = await sb.from('missions').select(cols).eq('lake_id', supaLakeId).order('created_at', { ascending: false }).limit(1);
-  if (error) throw new Error(error.message);
+  if (error) throw dbError(null, error);
   return data && data.length > 0 ? toLatest(data[0] as MissionRow) : EMPTY;
 }
 
@@ -268,7 +287,7 @@ export async function fetchMissions(deviceId: string, limit = 100): Promise<Miss
     .eq('device_id', deviceId)
     .order('created_at', { ascending: false })
     .limit(limit);
-  if (error) throw new Error(error.message);
+  if (error) throw dbError(null, error);
   const rows = (data ?? []) as Array<{
     mission_id: string;
     status: string;
@@ -320,7 +339,7 @@ export async function fetchSensorHistory(q: {
       .order('recorded_at', { ascending: true })
       .order('reading_id')
       .range(from, Math.min(from + PAGE, HISTORY_MAX_ROWS) - 1);
-    if (error) throw new Error(error.message);
+    if (error) throw dbError(null, error);
     const rows = ((data ?? []) as unknown as ReadingRow[]).map(readingToSample);
     out.push(...rows);
     if (rows.length < PAGE) return { samples: out, truncated: false };

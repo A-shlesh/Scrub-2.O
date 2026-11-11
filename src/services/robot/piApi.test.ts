@@ -6,7 +6,7 @@ vi.mock('../../config/backend', () => ({
 }));
 vi.mock('../supabase/supabaseClient', () => ({ supabase: null, supabaseConfigured: false }));
 
-import { getMissionStatus, post } from './piApi';
+import { getMissionStatus, post, reason } from './piApi';
 
 const reply = (status: number, body: unknown) =>
   vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
@@ -22,7 +22,7 @@ describe('Pi REST client', () => {
     const fetchMock = reply(201, { mission_id: 'm1', status: 'LOADED', waypoint_count: 12, checksum: 'abc' });
     vi.stubGlobal('fetch', fetchMock);
     const a = await post('/api/missions', { mission_id: 'm1' }, 1000);
-    expect(a).toEqual({ status: 'ACKED', detail: null, ack: { mission_id: 'm1', status: 'LOADED', waypoint_count: 12, checksum: 'abc' } });
+    expect(a).toEqual({ status: 'ACKED', detail: null, httpStatus: 201, ack: { mission_id: 'm1', status: 'LOADED', waypoint_count: 12, checksum: 'abc' } });
     expect(fetchMock.mock.calls[0][0]).toBe('https://pi.example.com/api/missions');
     expect(fetchMock.mock.calls[0][1].method).toBe('POST');
   });
@@ -52,5 +52,23 @@ describe('Pi REST client', () => {
     expect(await getMissionStatus('m1')).toMatchObject({ state: 'NAVIGATING', currentWaypoint: 4, totalWaypoints: 20, completedWaypoints: 3 });
     vi.stubGlobal('fetch', reply(404, {}));
     expect(await getMissionStatus('m1')).toBeNull();
+  });
+
+  it('reads errors lists, and names auth and old-backend problems', async () => {
+    expect(reason({ errors: ['bad latitude', 'too many waypoints'] }, 'x')).toBe('bad latitude; too many waypoints');
+    expect(reason({ detail: 'first', errors: ['second'] }, 'x')).toBe('first');
+    vi.stubGlobal('fetch', reply(401, { detail: 'jwt expired' }));
+    expect((await post('/api/missions/m1/start', {}, 1000)).detail).toBe('Not signed in / not authorised for the robot.');
+    vi.stubGlobal('fetch', reply(403, {}));
+    expect((await post('/api/missions', {}, 1000)).detail).toBe('Not signed in / not authorised for the robot.');
+    vi.stubGlobal('fetch', reply(404, { detail: 'Not Found' }));
+    expect((await post('/api/missions/m1/return-home', {}, 1000)).detail).toBe('Robot backend is too old (no return-home endpoint).');
+    vi.stubGlobal('fetch', reply(500, {}));
+    expect(await post('/api/missions/m1/start', {}, 1000)).toMatchObject({ status: 'REJECTED', detail: 'HTTP 500', httpStatus: 500 });
+  });
+
+  it('accepts current_waypoint_index and status in the mission state', async () => {
+    vi.stubGlobal('fetch', reply(200, { status: 'ACTIVE', current_waypoint_index: 9, total_waypoints: 20 }));
+    expect(await getMissionStatus('m1')).toMatchObject({ state: 'ACTIVE', currentWaypoint: 9, totalWaypoints: 20 });
   });
 });

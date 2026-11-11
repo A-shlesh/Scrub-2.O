@@ -36,8 +36,9 @@ import type { LatLon, MissionState } from '../types';
 import { fmtMissionState } from '../utils/format';
 import { abandonMission, createMission, fetchLatestMission, markMissionLoading, pushLake } from '../services/supabase/supabaseService';
 import type { LatestMission } from '../services/supabase/supabaseService';
-import { ROBOT_ID } from '../services/supabase/robotService';
-import { describeAnswer, robotLink } from '../services/robot/robotLink';
+import { ROBOT_ID } from '../config/robot';
+import { describeAnswer, NOT_CONFIGURED, robotLink } from '../services/robot/robotLink';
+import { logHealthOnce } from '../services/robot/startupCheck';
 import type { MissionCommand } from '../services/robot/robotLink';
 import type { PiMissionStatus } from '../services/robot/piApi';
 import { normaliseMissionState } from '../services/realtime/telemetryParser';
@@ -60,7 +61,7 @@ const FINAL_STATES: MissionState[] = ['completed', 'aborted', 'emergency_stop'];
 
 export function MissionPage() {
   const { lake, shoreMarginM, boundary, holes } = useLake();
-  const { telemetry, live, trail } = useTelemetry();
+  const { telemetry, live, trail, connection, source } = useTelemetry();
   const useCloud = supabaseConfigured && !DEMO;
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -138,11 +139,12 @@ export function MissionPage() {
   // Robot-side state straight from the Pi backend, every 5 s; also tells us whether the backend is reachable.
   useEffect(() => {
     setPiStatus(null);
-    if (robotLink.kind !== 'pi') return;
+    if (!robotLink.configured) return;
     let cancelled = false;
     const load = async () => {
       const up = await robotLink.health();
       if (cancelled) return;
+      logHealthOnce(up);
       setBackendUp(up);
       if (!missionId || !up) return;
       try {
@@ -372,14 +374,31 @@ export function MissionPage() {
               <h3>{missionId ? `Mission ${missionId.slice(0, 8)}` : 'New mission'}</h3>
               <span className="chev"><ChevronRight size={18} /></span>
             </div>
-            <p className="panel-sub">
-              {lake ? `${lake.name ?? 'Unnamed lake'} · robot ${ROBOT_ID}` : 'No lake selected'}
-              {robotLink.kind === 'pi' && (
-                <span className={backendUp === false ? 'text-bad' : undefined}>
-                  {' · '}backend {backendUp === null ? 'checking…' : backendUp ? 'reachable' : 'unreachable'}
-                </span>
+            <p className="panel-sub">{lake ? `${lake.name ?? 'Unnamed lake'} · robot ${ROBOT_ID}` : 'No lake selected'}</p>
+            <p className="backend-status" aria-label="Robot backend status">
+              {robotLink.configured ? (
+                <>
+                  Robot backend <code>{robotLink.baseUrl}</code> ·{' '}
+                  <span className={backendUp === false ? 'text-bad' : backendUp ? 'text-ok' : undefined}>
+                    {backendUp === null ? 'checking…' : backendUp ? 'reachable' : 'unreachable'}
+                  </span>
+                </>
+              ) : (
+                <span className="text-bad">Robot backend not configured</span>
               )}
+              {' · '}telemetry {source === 'pi' ? 'Pi WebSocket' : source === 'supabase' ? 'Supabase Realtime' : source === 'demo' ? 'demo' : 'none'}
             </p>
+            {!robotLink.configured && !DEMO && (
+              <div className="notice error" role="alert">
+                <strong>{robotLink.problem ? 'Robot backend URL is not usable' : NOT_CONFIGURED}</strong>
+                <br />
+                {robotLink.problem ??
+                  'This build has no VITE_API_BASE_URL, so missions cannot be sent. Set it in Vercel (Production and Preview) and redeploy without the build cache.'}
+              </div>
+            )}
+            {connection.status === 'error' && connection.detail && (
+              <div className="notice error" role="alert">Live telemetry: {connection.detail}</div>
+            )}
 
             <dl className="kv-rows">
               {areaHa !== null && <div><dt><Ruler size={18} />Area</dt><dd>{areaHa < 10 ? areaHa.toFixed(2) : areaHa.toFixed(1)} ha</dd></div>}
@@ -514,9 +533,6 @@ export function MissionPage() {
               <div className={`notice${notice.tone === 'info' ? '' : ` ${notice.tone}`}`} role={notice.tone === 'error' ? 'alert' : 'status'}>
                 {notice.text}
               </div>
-            )}
-            {!canReach && !DEMO && (
-              <div className="notice" role="status">No robot connection is configured (VITE_API_BASE_URL or Supabase), so the robot cannot be reached.</div>
             )}
 
             <Link to="/observatory" className="btn btn-block">Edit lake polygon</Link>

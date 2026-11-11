@@ -22,6 +22,8 @@ interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string;
   /** Pi WebSocket base, e.g. wss://pi.example.com (default: VITE_API_BASE_URL with ws/wss) */
   readonly VITE_WS_BASE_URL?: string;
+  /** "supabase" = live telemetry from Supabase Realtime Broadcast instead of the Pi WebSocket (default) */
+  readonly VITE_TELEMETRY_SOURCE?: string;
   /** minutes of driving on a full battery (default 120) */
   readonly VITE_BATTERY_MINUTES?: string;
   /** "1" = operators must sign in (Supabase Auth) before using the dashboard */

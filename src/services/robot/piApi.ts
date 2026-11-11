@@ -9,7 +9,8 @@
  *
  * The Pi answers a POST only after it has acted (for /api/missions: after the waypoints
  * are validated and committed to SQLite). An HTTP 2xx therefore means "done", a 4xx/5xx
- * means "refused" with a reason in `detail`.
+ * means "refused" with a reason in `detail` (or `errors`, a list of strings).
+ * Every request carries `Authorization: Bearer <Supabase access token>` when signed in.
  */
 import { API_BASE_URL, insecureUrlProblem } from '../../config/backend';
 import { supabase } from '../supabase/supabaseClient';
@@ -50,12 +51,29 @@ async function readJson(res: Response): Promise<Record<string, unknown> | null> 
   }
 }
 
-function reason(body: Record<string, unknown> | null, fallback: string): string {
-  const d = body?.detail ?? body?.message ?? body?.error;
+/** The backend's reason: `detail` first, then `errors` (list of strings), `message`, `error`. */
+export function reason(body: Record<string, unknown> | null, fallback: string): string {
+  const d = body?.detail;
   if (typeof d === 'string' && d.trim()) return d;
   // FastAPI validation errors: {"detail": [{"msg": "..."}]}
   if (Array.isArray(d) && d.length > 0 && typeof d[0]?.msg === 'string') return d.map((x: { msg: string }) => x.msg).join('; ');
+  const errors = body?.errors;
+  if (Array.isArray(errors)) {
+    const list = errors.filter((e): e is string => typeof e === 'string' && e.trim() !== '');
+    if (list.length > 0) return list.join('; ');
+  }
+  for (const k of ['message', 'error'] as const) {
+    const v = body?.[k];
+    if (typeof v === 'string' && v.trim()) return v;
+  }
   return fallback;
+}
+
+/** Refusal text for an HTTP error, with the special cases the operator needs to act on. */
+export function refusal(status: number, path: string, body: Record<string, unknown> | null): string {
+  if (status === 401 || status === 403) return 'Not signed in / not authorised for the robot.';
+  if (status === 404 && path.endsWith('/return-home')) return 'Robot backend is too old (no return-home endpoint).';
+  return reason(body, `HTTP ${status}`);
 }
 
 /** POST and turn the response into an answer. Network failures throw; a timeout is EXPIRED. */
@@ -74,9 +92,11 @@ export async function post(path: string, body: unknown, timeoutMs: number): Prom
     clearTimeout(timer);
   }
   const json = await readJson(res);
-  if (!res.ok) return { status: 'REJECTED', detail: reason(json, `HTTP ${res.status}`), ack: json };
-  if (json?.ok === false || json?.status === 'REJECTED') return { status: 'REJECTED', detail: reason(json, 'Refused by the robot.'), ack: json };
-  return { status: 'ACKED', detail: null, ack: json };
+  if (!res.ok) return { status: 'REJECTED', detail: refusal(res.status, path, json), ack: json, httpStatus: res.status };
+  if (json?.ok === false || json?.status === 'REJECTED') {
+    return { status: 'REJECTED', detail: reason(json, 'Refused by the robot.'), ack: json, httpStatus: res.status };
+  }
+  return { status: 'ACKED', detail: null, ack: json, httpStatus: res.status };
 }
 
 export async function getMissionStatus(missionId: string, timeoutMs = 8000): Promise<PiMissionStatus | null> {
@@ -86,11 +106,11 @@ export async function getMissionStatus(missionId: string, timeoutMs = 8000): Pro
     const res = await fetch(url(`/api/missions/${encodeURIComponent(missionId)}`), { headers: await headers(), signal: ctrl.signal });
     if (res.status === 404) return null;
     const json = await readJson(res);
-    if (!res.ok || !json) throw new Error(reason(json, `HTTP ${res.status}`));
+    if (!res.ok || !json) throw new Error(refusal(res.status, '', json));
     return {
       missionId,
       state: typeof json.state === 'string' ? json.state : typeof json.status === 'string' ? json.status : null,
-      currentWaypoint: num(json.current_waypoint),
+      currentWaypoint: num(json.current_waypoint) ?? num(json.current_waypoint_index),
       totalWaypoints: num(json.total_waypoints) ?? num(json.waypoint_count),
       completedWaypoints: num(json.completed_waypoints),
       detail: typeof json.detail === 'string' ? json.detail : null,

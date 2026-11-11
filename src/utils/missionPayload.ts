@@ -105,6 +105,9 @@ export function ackMismatch(payload: Pick<MissionPayload, 'waypoint_count' | 'ch
   const count = Number(ack?.waypoint_count);
   const checksum = typeof ack?.checksum === 'string' ? ack.checksum.toLowerCase() : '';
   if (count === payload.waypoint_count && checksum === payload.checksum) return null;
+  if (ack?.waypoint_count === undefined && ack?.checksum === undefined) {
+    return 'The robot answered without a waypoint count or checksum: the backend is on an old version, update the Pi. Not safe to start.';
+  }
   const parts: string[] = [];
   if (count !== payload.waypoint_count) parts.push(`${Number.isFinite(count) ? count : 'no'} waypoints (sent ${payload.waypoint_count})`);
   if (checksum !== payload.checksum) parts.push(checksum ? 'a different checksum' : 'no checksum');
